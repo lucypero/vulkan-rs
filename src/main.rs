@@ -1,6 +1,7 @@
 mod platforms;
 
-use std::ffi::CString;
+use std::ffi::{CString, c_void, CStr};
+use std::os::raw::c_char;
 
 use winit::event::{Event, VirtualKeyCode, ElementState, KeyboardInput, WindowEvent};
 use winit::event_loop::{EventLoop, ControlFlow};
@@ -24,6 +25,7 @@ impl VulkanApp {
     pub unsafe fn new() -> VulkanApp {
 
         // init vulkan stuff
+
         let entry = ash::Entry::new().unwrap();
 
         let app_info = vk::ApplicationInfo::builder()
@@ -32,15 +34,48 @@ impl VulkanApp {
 
         let extension_names = platforms::required_extension_names();
 
+        let validation_layer : CString = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+        let enabled_layer_names = [validation_layer.as_ptr()];
+
+        let mut debug_utils_messenger_create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+            .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::all())
+            .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
+            .pfn_user_callback(Some(Self::debug_utils_callback))
+        ;
+
         let create_info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
             .enabled_extension_names(&extension_names)
+            .enabled_layer_names(&enabled_layer_names)
+            .push_next(&mut debug_utils_messenger_create_info)
         ;
 
         let instance = entry.create_instance(&create_info, None)
             .expect("failed to create vk instance");
-        
+
         VulkanApp{entry, instance}
+    }
+
+    unsafe extern "system" fn debug_utils_callback(
+        message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+        message_types: vk::DebugUtilsMessageTypeFlagsEXT,
+        p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+        _p_user_data: *mut c_void,
+    ) -> u32 {
+        let message_severity = match message_severity {
+            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => log::Level::Debug,
+            vk::DebugUtilsMessageSeverityFlagsEXT::INFO => log::Level::Info,
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => log::Level::Warn,
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => log::Level::Error,
+            _ => log::Level::Error,
+        };
+        let message = CStr::from_ptr((*p_callback_data).p_message);
+        if let Ok(message) = message.to_str() {
+            log::log!(message_severity, "{:?}: {}", message_types, message);
+        } else {
+            log::log!(message_severity, "{:?}: {:?}", message_types, message);
+        }
+        vk::FALSE
     }
     
     fn print_available_extensions(&self) {
@@ -116,6 +151,7 @@ fn main() {
     
     unsafe {
         let vulkan_app = VulkanApp::new();
+        vulkan_app.print_available_extensions();
         vulkan_app.main_loop(event_loop, window);
     }
 

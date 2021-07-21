@@ -1,0 +1,7 @@
+- instance
+- debug messenger
+- surface
+- physical device
+- device
+
+- swapchain
