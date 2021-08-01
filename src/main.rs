@@ -4,10 +4,12 @@ mod platforms;
 
 use std::borrow::Borrow;
 use std::ffi::{c_void, CStr, CString};
+use std::fs::File;
 use std::os::raw::c_char;
+use std::path::Path;
 use std::str::FromStr;
 
-use ash::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, ClearColorValue, ClearValue, ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, Offset2D, PipelineBindPoint, PipelineStageFlags, PresentInfoKHR, PresentModeKHR, Rect2D, RenderPass, RenderPassBeginInfo, RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, SubmitInfo, SubpassContents, SubpassDescription, SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR};
+use ash::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, ClearColorValue, ClearValue, ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, Offset2D, Pipeline, PipelineBindPoint, PipelineColorBlendAttachmentState, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineStageFlags, PipelineVertexInputStateCreateInfo, PresentInfoKHR, PresentModeKHR, Rect2D, RenderPass, RenderPassBeginInfo, RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule, ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription, SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR, Viewport};
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
     vk::{self, Handle},
@@ -24,6 +26,24 @@ use winit::window::Window;
 const WINDOW_TITLE: &'static str = "vulkan-rs";
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
+
+struct PipelineBuilder {
+    shader_stages: Vec<PipelineShaderStageCreateInfo>,
+    vertex_input_info: PipelineVertexInputStateCreateInfo,
+    input_assembly: PipelineInputAssemblyStateCreateInfo,
+    viewport: Viewport,
+    scissor: Rect2D,
+    rasterizer: PipelineRasterizationStateCreateInfo,
+    color_blend_attachment: PipelineColorBlendAttachmentState,
+    multisampling: PipelineMultisampleStateCreateInfo,
+    pipeline_layout: PipelineLayout,
+}
+
+impl PipelineBuilder {
+    fn build_pipeline(device: &ash::Device, render_pass: RenderPass) -> Pipeline {
+        panic!();
+    }
+}
 
 struct VulkanApp {
     entry: Entry,
@@ -48,7 +68,7 @@ struct VulkanApp {
     queues: Queues,
 
     // "game" state
-    frame_number: i64
+    frame_number: i64,
 }
 
 struct Queues {
@@ -358,6 +378,8 @@ impl VulkanApp {
             .create_semaphore(&semaphore_create_info, None)
             .unwrap();
 
+        init_pipelines(&device);
+
         VulkanApp {
             entry,
             instance,
@@ -379,7 +401,7 @@ impl VulkanApp {
             present_semaphore,
             render_semaphore,
             frame_number: 0,
-            queues
+            queues,
         }
     }
 
@@ -395,54 +417,81 @@ impl VulkanApp {
     }
 
     unsafe fn draw_frame(&mut self) {
-
-        self.device.wait_for_fences(&[self.render_fence], true, 1000000000).unwrap();
+        self.device
+            .wait_for_fences(&[self.render_fence], true, 1000000000)
+            .unwrap();
         self.device.reset_fences(&[self.render_fence]).unwrap();
 
-        let swapchain_index = self.swapchain_loader.acquire_next_image(self.swapchain, 1000000000, self.present_semaphore, Fence::null()).unwrap();
+        let swapchain_index = self
+            .swapchain_loader
+            .acquire_next_image(
+                self.swapchain,
+                1000000000,
+                self.present_semaphore,
+                Fence::null(),
+            )
+            .unwrap();
 
-        self.device.reset_command_buffer(self.main_cmd_buffer, CommandBufferResetFlags::empty()).unwrap();
+        self.device
+            .reset_command_buffer(self.main_cmd_buffer, CommandBufferResetFlags::empty())
+            .unwrap();
 
         let cmd_begin_info = CommandBufferBeginInfo::builder()
-        .flags(CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-        .build();
-        self.device.begin_command_buffer(self.main_cmd_buffer, &cmd_begin_info).unwrap();
+            .flags(CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+            .build();
+        self.device
+            .begin_command_buffer(self.main_cmd_buffer, &cmd_begin_info)
+            .unwrap();
 
         let flash = f32::abs((self.frame_number as f32 / 120.).sin());
         let mut clear_value = ClearValue::default();
-        clear_value.color = vk::ClearColorValue{float32: [0., 0., flash, 1.]};
+        clear_value.color = vk::ClearColorValue {
+            float32: [0., 0., flash, 1.],
+        };
 
         let rp_info = RenderPassBeginInfo::builder()
-        .render_pass(self.render_pass)
-        .render_area(Rect2D{ offset: Offset2D::default(), extent: Extent2D{ width: WINDOW_WIDTH, height: WINDOW_HEIGHT } })
-        .framebuffer(self.framebuffers[swapchain_index.0 as usize])
-        .clear_values(&[clear_value])
-        .build();
+            .render_pass(self.render_pass)
+            .render_area(Rect2D {
+                offset: Offset2D::default(),
+                extent: Extent2D {
+                    width: WINDOW_WIDTH,
+                    height: WINDOW_HEIGHT,
+                },
+            })
+            .framebuffer(self.framebuffers[swapchain_index.0 as usize])
+            .clear_values(&[clear_value])
+            .build();
 
-        self.device.cmd_begin_render_pass(self.main_cmd_buffer, &rp_info, SubpassContents::INLINE);
+        self.device
+            .cmd_begin_render_pass(self.main_cmd_buffer, &rp_info, SubpassContents::INLINE);
 
         //render stuff..
 
-
         self.device.cmd_end_render_pass(self.main_cmd_buffer);
-        self.device.end_command_buffer(self.main_cmd_buffer).unwrap();
+        self.device
+            .end_command_buffer(self.main_cmd_buffer)
+            .unwrap();
 
         let vk_submit_info = SubmitInfo::builder()
-        .wait_dst_stage_mask(&[PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
-        .wait_semaphores(&[self.present_semaphore])
-        .signal_semaphores(&[self.render_semaphore])
-        .command_buffers(&[self.main_cmd_buffer])
-        .build();
+            .wait_dst_stage_mask(&[PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
+            .wait_semaphores(&[self.present_semaphore])
+            .signal_semaphores(&[self.render_semaphore])
+            .command_buffers(&[self.main_cmd_buffer])
+            .build();
 
-        self.device.queue_submit(self.queues.graphics, &[vk_submit_info], self.render_fence).unwrap();
+        self.device
+            .queue_submit(self.queues.graphics, &[vk_submit_info], self.render_fence)
+            .unwrap();
 
         let present_info = PresentInfoKHR::builder()
-        .swapchains(&[self.swapchain])
-        .wait_semaphores(&[self.render_semaphore])
-        .image_indices(&[swapchain_index.0])
-        .build();
+            .swapchains(&[self.swapchain])
+            .wait_semaphores(&[self.render_semaphore])
+            .image_indices(&[swapchain_index.0])
+            .build();
 
-        self.swapchain_loader.queue_present(self.queues.graphics, &present_info).unwrap();
+        self.swapchain_loader
+            .queue_present(self.queues.graphics, &present_info)
+            .unwrap();
         self.frame_number += 1;
     }
 
@@ -475,11 +524,9 @@ impl VulkanApp {
             Event::MainEventsCleared => {
                 window.request_redraw();
             }
-            Event::RedrawRequested(_window_id) => {
-                unsafe{
-                    self.draw_frame();
-                }
-            }
+            Event::RedrawRequested(_window_id) => unsafe {
+                self.draw_frame();
+            },
             _ => (),
         })
     }
@@ -561,6 +608,44 @@ impl Drop for VulkanApp {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+unsafe fn load_shader_module(
+    device: &ash::Device,
+    file_path: String,
+) -> Result<ShaderModule, std::io::Error> {
+    let mut file = File::open(file_path)?;
+    let file = ash::util::read_spv(&mut file)?;
+
+    let shader_create_info = ShaderModuleCreateInfo::builder().code(&file[..]).build();
+
+    let shader_module = device
+        .create_shader_module(&shader_create_info, None)
+        .unwrap();
+    Ok(shader_module)
+}
+
+unsafe fn init_pipelines(device: &ash::Device) {
+    let triangle_frag_shader =
+        load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
+
+    let triangle_vertex_shader =
+        load_shader_module(device, "shaders/triangle.vert.spv".to_string()).unwrap();
+
+    println!("shaders successfully loaded.");
+}
+
+fn get_pipeline_shader_stage_create_info(stage: ShaderStageFlags, shader_module: ShaderModule) -> PipelineShaderStageCreateInfo {
+
+    let name = CString::new("main").unwrap();
+
+    let info = PipelineShaderStageCreateInfo::builder()
+    .stage(stage)
+    .module(shader_module)
+    .name(&name)
+    .build();
+
+    info
 }
 
 fn main() {
