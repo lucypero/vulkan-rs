@@ -9,6 +9,7 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::str::FromStr;
 
+use ash::prelude::VkResult;
 use ash::vk::{
     AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
     ClearColorValue, ClearValue, ColorComponentFlags, ColorSpaceKHR, CommandBuffer,
@@ -119,9 +120,12 @@ struct VulkanApp {
     queues: Queues,
     triangle_pipeline_layout: PipelineLayout,
     triangle_pipeline: Pipeline,
+    red_triangle_pipeline: Pipeline,
 
     // "game" state
     frame_number: i64,
+
+    selected_shader: i32,
 }
 
 struct Queues {
@@ -407,10 +411,10 @@ impl VulkanApp {
             height: WINDOW_HEIGHT,
         };
 
-        let (triangle_pipeline_layout, triangle_pipeline) =
+        let (triangle_pipeline_layout, triangle_pipeline, red_triangle_pipeline) =
             init_pipelines(&device, window_extent, render_pass);
 
-        VulkanApp {
+        let app = VulkanApp {
             entry,
             instance,
             debug_utils_fn,
@@ -435,7 +439,10 @@ impl VulkanApp {
 
             triangle_pipeline_layout,
             triangle_pipeline,
-        }
+            red_triangle_pipeline,
+            selected_shader: 0,
+        };
+        app
     }
 
     fn print_available_extensions(&self) {
@@ -500,11 +507,20 @@ impl VulkanApp {
 
         //render stuff..
 
-        self.device.cmd_bind_pipeline(
-            self.main_cmd_buffer,
-            PipelineBindPoint::GRAPHICS,
-            self.triangle_pipeline,
-        );
+        if self.selected_shader == 0 {
+            self.device.cmd_bind_pipeline(
+                self.main_cmd_buffer,
+                PipelineBindPoint::GRAPHICS,
+                self.triangle_pipeline,
+            );
+        } else {
+            self.device.cmd_bind_pipeline(
+                self.main_cmd_buffer,
+                PipelineBindPoint::GRAPHICS,
+                self.red_triangle_pipeline,
+            );
+        }
+
         self.device.cmd_draw(self.main_cmd_buffer, 3, 1, 0, 0);
 
         //finalize the render pass
@@ -558,6 +574,12 @@ impl VulkanApp {
                         (Some(VirtualKeyCode::Escape), ElementState::Pressed) => {
                             *control_flow = ControlFlow::Exit
                         }
+                        (Some(VirtualKeyCode::Space), ElementState::Pressed) => {
+                            self.selected_shader += 1;
+                            if self.selected_shader > 1 {
+                                self.selected_shader = 0;
+                            }
+                        }
                         _ => {}
                     },
                 },
@@ -571,6 +593,16 @@ impl VulkanApp {
             },
             _ => (),
         })
+    }
+
+    pub unsafe fn set_name<T: vk::Handle>(&self, object: T, name: &str) -> VkResult<()> {
+        let name = CString::new(name).unwrap();
+        let name_info = vk::DebugUtilsObjectNameInfoEXT::builder()
+            .object_type(T::TYPE)
+            .object_handle(object.as_raw())
+            .object_name(&name);
+        self.debug_utils_fn
+            .debug_utils_set_object_name(self.device.handle(), &name_info)
     }
 }
 
@@ -632,10 +664,9 @@ fn debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXTBu
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
-
-        self.device
-            .wait_for_fences(&[self.render_fence], true, 1000000000)
-            .unwrap();
+            self.device
+                .wait_for_fences(&[self.render_fence], true, 1000000000)
+                .unwrap();
 
             self.device.destroy_command_pool(self.command_pool, None);
             self.swapchain_loader
@@ -654,7 +685,8 @@ impl Drop for VulkanApp {
             self.device.destroy_fence(self.render_fence, None);
 
             self.device.destroy_pipeline(self.triangle_pipeline, None);
-            self.device.destroy_pipeline_layout(self.triangle_pipeline_layout, None);
+            self.device
+                .destroy_pipeline_layout(self.triangle_pipeline_layout, None);
 
             self.device.destroy_device(None);
             self.surface_fn.destroy_surface(self.surface, None);
@@ -684,19 +716,33 @@ unsafe fn init_pipelines(
     device: &ash::Device,
     window_extent: Extent2D,
     render_pass: RenderPass,
-) -> (PipelineLayout, Pipeline) {
+) -> (PipelineLayout, Pipeline, Pipeline) {
     let triangle_vertex_shader =
-        load_shader_module(device, "shaders/triangle.vert.spv".to_string()).unwrap();
+        load_shader_module(device, "shaders/colored_triangle.vert.spv".to_string()).unwrap();
 
     let triangle_frag_shader =
+        load_shader_module(device, "shaders/colored_triangle.frag.spv".to_string()).unwrap();
+
+    let red_triangle_vertex_shader =
+        load_shader_module(device, "shaders/triangle.vert.spv".to_string()).unwrap();
+
+    let red_triangle_frag_shader =
         load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
 
     //build the stage-create-info for both vertex and fragment stages. This lets the pipeline know the shader modules per stage
     let name = CString::new("main").unwrap();
 
     let shader_stages: Vec<PipelineShaderStageCreateInfo> = vec![
-        get_pipeline_shader_stage_create_info(ShaderStageFlags::VERTEX, triangle_vertex_shader, &name),
-        get_pipeline_shader_stage_create_info(ShaderStageFlags::FRAGMENT, triangle_frag_shader, &name),
+        get_pipeline_shader_stage_create_info(
+            ShaderStageFlags::VERTEX,
+            triangle_vertex_shader,
+            &name,
+        ),
+        get_pipeline_shader_stage_create_info(
+            ShaderStageFlags::FRAGMENT,
+            triangle_frag_shader,
+            &name,
+        ),
     ];
 
     //vertex input controls how to read vertices from vertex buffers. We aren't using it yet
@@ -749,18 +795,37 @@ unsafe fn init_pipelines(
 
     let triangle_pipeline = triangle_pipeline_builder.build_pipeline(device, render_pass);
 
+    triangle_pipeline_builder.shader_stages.clear();
+    triangle_pipeline_builder.shader_stages.clear();
+
+    triangle_pipeline_builder
+        .shader_stages
+        .push(get_pipeline_shader_stage_create_info(
+            ShaderStageFlags::VERTEX,
+            red_triangle_vertex_shader,
+            &name,
+        ));
+    triangle_pipeline_builder
+        .shader_stages
+        .push(get_pipeline_shader_stage_create_info(
+            ShaderStageFlags::FRAGMENT,
+            red_triangle_frag_shader,
+            &name,
+        ));
+
+    let red_triangle_pipeline = triangle_pipeline_builder.build_pipeline(device, render_pass);
 
     //destroy shader modules
     device.destroy_shader_module(triangle_frag_shader, None);
     device.destroy_shader_module(triangle_vertex_shader, None);
 
-    (pipeline_layout, triangle_pipeline)
+    (pipeline_layout, triangle_pipeline, red_triangle_pipeline)
 }
 
 fn get_pipeline_shader_stage_create_info(
     stage: ShaderStageFlags,
     shader_module: ShaderModule,
-    name: &CString
+    name: &CString,
 ) -> PipelineShaderStageCreateInfo {
     let info = PipelineShaderStageCreateInfo::builder()
         .stage(stage)
