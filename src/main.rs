@@ -9,7 +9,27 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::str::FromStr;
 
-use ash::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, ClearColorValue, ClearValue, ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, Offset2D, Pipeline, PipelineBindPoint, PipelineColorBlendAttachmentState, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineStageFlags, PipelineVertexInputStateCreateInfo, PresentInfoKHR, PresentModeKHR, Rect2D, RenderPass, RenderPassBeginInfo, RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule, ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription, SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR, Viewport};
+use ash::vk::{
+    AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+    ClearColorValue, ClearValue, ColorComponentFlags, ColorSpaceKHR, CommandBuffer,
+    CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags,
+    CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo,
+    CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR,
+    CullModeFlags, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer,
+    FramebufferCreateInfo, FrontFace, GraphicsPipelineCreateInfo, Image, ImageAspectFlags,
+    ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo,
+    ImageViewType, LogicOp, Offset2D, Pipeline, PipelineBindPoint, PipelineCache,
+    PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo,
+    PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo,
+    PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo,
+    PipelineShaderStageCreateInfo, PipelineStageFlags, PipelineVertexInputStateCreateInfo,
+    PipelineVertexInputStateCreateInfoBuilder, PipelineViewportStateCreateInfo, PolygonMode,
+    PresentInfoKHR, PresentModeKHR, PrimitiveTopology, Rect2D, RenderPass, RenderPassBeginInfo,
+    RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule,
+    ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription,
+    SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR,
+    Viewport,
+};
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
     vk::{self, Handle},
@@ -40,8 +60,39 @@ struct PipelineBuilder {
 }
 
 impl PipelineBuilder {
-    fn build_pipeline(device: &ash::Device, render_pass: RenderPass) -> Pipeline {
-        panic!();
+    unsafe fn build_pipeline(&mut self, device: &ash::Device, render_pass: RenderPass) -> Pipeline {
+        let viewport_state = PipelineViewportStateCreateInfo::builder()
+            .viewports(&[self.viewport])
+            .scissors(&[self.scissor])
+            .build();
+
+        let color_blending = PipelineColorBlendStateCreateInfo::builder()
+            .logic_op_enable(false)
+            .logic_op(LogicOp::COPY)
+            .attachments(&[self.color_blend_attachment])
+            .build();
+
+        //build the actual pipeline
+        //we now use all of the info structs we have been writing into into this one to create the pipeline
+        let pipeline_info = GraphicsPipelineCreateInfo::builder()
+            .stages(&self.shader_stages[..])
+            .vertex_input_state(&self.vertex_input_info)
+            .input_assembly_state(&self.input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&self.rasterizer)
+            .multisample_state(&self.multisampling)
+            .color_blend_state(&color_blending)
+            .layout(self.pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0)
+            .base_pipeline_handle(Pipeline::null())
+            .build();
+
+        let new_pipeline = device
+            .create_graphics_pipelines(PipelineCache::null(), &[pipeline_info], None)
+            .expect("couldn't create the pipeline");
+
+        new_pipeline[0]
     }
 }
 
@@ -66,6 +117,8 @@ struct VulkanApp {
     render_semaphore: Semaphore,
     render_fence: Fence,
     queues: Queues,
+    triangle_pipeline_layout: PipelineLayout,
+    triangle_pipeline: Pipeline,
 
     // "game" state
     frame_number: i64,
@@ -254,18 +307,6 @@ impl VulkanApp {
         //command stuff
          */
 
-        // //create a command pool for commands submitted to the graphics queue.
-        // VkCommandPoolCreateInfo commandPoolInfo = {};
-        // commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        // commandPoolInfo.pNext = nullptr;
-
-        // //the command pool will be one that can submit graphics commands
-        // commandPoolInfo.queueFamilyIndex = _graphicsQueueFamily;
-        // //we also want the pool to allow for resetting of individual command buffers
-        // commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-
-        // VK_CHECK(vkCreateCommandPool(_device, &commandPoolInfo, nullptr, &_commandPool));
-
         let command_pool_info = CommandPoolCreateInfo::builder()
             .queue_family_index(queues.graphics_family)
             .flags(CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
@@ -274,23 +315,6 @@ impl VulkanApp {
         let command_pool = device
             .create_command_pool(&command_pool_info, None)
             .unwrap();
-
-        //command buffer
-        // // --- other code ----
-
-        // //allocate the default command buffer that we will use for rendering
-        // VkCommandBufferAllocateInfo cmdAllocInfo = {};
-        // cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        // cmdAllocInfo.pNext = nullptr;
-
-        // //commands will be made from our _commandPool
-        // cmdAllocInfo.commandPool = _commandPool;
-        // //we will allocate 1 command buffer
-        // cmdAllocInfo.commandBufferCount = 1;
-        // // command level is Primary
-        // cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-
-        // VK_CHECK(vkAllocateCommandBuffers(_device, &cmdAllocInfo, &_mainCommandBuffer));
 
         let cmd_buffer_allocate_info = CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
@@ -378,7 +402,13 @@ impl VulkanApp {
             .create_semaphore(&semaphore_create_info, None)
             .unwrap();
 
-        init_pipelines(&device);
+        let window_extent = Extent2D {
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
+        };
+
+        let (triangle_pipeline_layout, triangle_pipeline) =
+            init_pipelines(&device, window_extent, render_pass);
 
         VulkanApp {
             entry,
@@ -402,6 +432,9 @@ impl VulkanApp {
             render_semaphore,
             frame_number: 0,
             queues,
+
+            triangle_pipeline_layout,
+            triangle_pipeline,
         }
     }
 
@@ -466,6 +499,15 @@ impl VulkanApp {
             .cmd_begin_render_pass(self.main_cmd_buffer, &rp_info, SubpassContents::INLINE);
 
         //render stuff..
+
+        self.device.cmd_bind_pipeline(
+            self.main_cmd_buffer,
+            PipelineBindPoint::GRAPHICS,
+            self.triangle_pipeline,
+        );
+        self.device.cmd_draw(self.main_cmd_buffer, 3, 1, 0, 0);
+
+        //finalize the render pass
 
         self.device.cmd_end_render_pass(self.main_cmd_buffer);
         self.device
@@ -590,6 +632,11 @@ fn debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXTBu
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+
+        self.device
+            .wait_for_fences(&[self.render_fence], true, 1000000000)
+            .unwrap();
+
             self.device.destroy_command_pool(self.command_pool, None);
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
@@ -601,6 +648,14 @@ impl Drop for VulkanApp {
             for image_view in &self.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);
             }
+
+            self.device.destroy_semaphore(self.present_semaphore, None);
+            self.device.destroy_semaphore(self.render_semaphore, None);
+            self.device.destroy_fence(self.render_fence, None);
+
+            self.device.destroy_pipeline(self.triangle_pipeline, None);
+            self.device.destroy_pipeline_layout(self.triangle_pipeline_layout, None);
+
             self.device.destroy_device(None);
             self.surface_fn.destroy_surface(self.surface, None);
             self.debug_utils_fn
@@ -625,30 +680,165 @@ unsafe fn load_shader_module(
     Ok(shader_module)
 }
 
-unsafe fn init_pipelines(device: &ash::Device) {
-    let triangle_frag_shader =
-        load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
-
+unsafe fn init_pipelines(
+    device: &ash::Device,
+    window_extent: Extent2D,
+    render_pass: RenderPass,
+) -> (PipelineLayout, Pipeline) {
     let triangle_vertex_shader =
         load_shader_module(device, "shaders/triangle.vert.spv".to_string()).unwrap();
 
-    println!("shaders successfully loaded.");
-}
+    let triangle_frag_shader =
+        load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
 
-fn get_pipeline_shader_stage_create_info(stage: ShaderStageFlags, shader_module: ShaderModule) -> PipelineShaderStageCreateInfo {
-
+    //build the stage-create-info for both vertex and fragment stages. This lets the pipeline know the shader modules per stage
     let name = CString::new("main").unwrap();
 
+    let shader_stages: Vec<PipelineShaderStageCreateInfo> = vec![
+        get_pipeline_shader_stage_create_info(ShaderStageFlags::VERTEX, triangle_vertex_shader, &name),
+        get_pipeline_shader_stage_create_info(ShaderStageFlags::FRAGMENT, triangle_frag_shader, &name),
+    ];
+
+    //vertex input controls how to read vertices from vertex buffers. We aren't using it yet
+    let vertex_input_info = get_vertex_input_state_create_info();
+
+    //input assembly is the configuration for drawing triangle lists, strips, or individual points.
+    //we are just going to draw triangle list
+    let input_assembly = get_input_assembly_create_info(PrimitiveTopology::TRIANGLE_LIST);
+
+    //build viewport and scissor from the swapchain extents
+    let viewport = Viewport::builder()
+        .x(0.0)
+        .y(0.0)
+        .width(window_extent.width as f32)
+        .height(window_extent.height as f32)
+        .min_depth(0.0)
+        .max_depth(1.0)
+        .build();
+
+    let scissor: Rect2D = Rect2D::builder().extent(window_extent).build();
+
+    //configure the rasterizer to draw filled triangles
+    let rasterizer = get_rasterization_state_create_info(PolygonMode::FILL);
+
+    //we don't use multisampling, so just run the default one
+    let multisampling = get_multisampling_state_create_info();
+
+    //a single blend attachment with no blending and writing to RGBA
+    let color_blend_attachment = get_color_blend_attachment_state();
+
+    //build the pipeline layout that controls the inputs/outputs of the shader
+    //we are not using descriptor sets or other systems yet, so no need to use anything other than empty default
+    let pipeline_layout_info = get_pipeline_layout_create_info();
+    let pipeline_layout = device
+        .create_pipeline_layout(&pipeline_layout_info, None)
+        .expect("could not create pipeline layout");
+
+    //finally build the pipeline
+    let mut triangle_pipeline_builder = PipelineBuilder {
+        shader_stages,
+        vertex_input_info,
+        input_assembly,
+        viewport,
+        scissor,
+        rasterizer,
+        color_blend_attachment,
+        multisampling,
+        pipeline_layout,
+    };
+
+    let triangle_pipeline = triangle_pipeline_builder.build_pipeline(device, render_pass);
+
+
+    //destroy shader modules
+    device.destroy_shader_module(triangle_frag_shader, None);
+    device.destroy_shader_module(triangle_vertex_shader, None);
+
+    (pipeline_layout, triangle_pipeline)
+}
+
+fn get_pipeline_shader_stage_create_info(
+    stage: ShaderStageFlags,
+    shader_module: ShaderModule,
+    name: &CString
+) -> PipelineShaderStageCreateInfo {
     let info = PipelineShaderStageCreateInfo::builder()
-    .stage(stage)
-    .module(shader_module)
-    .name(&name)
-    .build();
+        .stage(stage)
+        .module(shader_module)
+        .name(name)
+        .build();
 
     info
 }
 
+fn get_vertex_input_state_create_info() -> PipelineVertexInputStateCreateInfo {
+    let info = PipelineVertexInputStateCreateInfo::builder().build();
+
+    info
+}
+
+fn get_input_assembly_create_info(
+    topology: PrimitiveTopology,
+) -> PipelineInputAssemblyStateCreateInfo {
+    let info = PipelineInputAssemblyStateCreateInfo::builder()
+        .topology(topology)
+        .primitive_restart_enable(false)
+        .build();
+    info
+}
+
+fn get_rasterization_state_create_info(
+    polygon_mode: PolygonMode,
+) -> PipelineRasterizationStateCreateInfo {
+    let info = PipelineRasterizationStateCreateInfo::builder()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(polygon_mode)
+        .line_width(1.0)
+        .cull_mode(CullModeFlags::NONE)
+        .front_face(FrontFace::CLOCKWISE)
+        .depth_bias_enable(false)
+        .depth_bias_constant_factor(0.0)
+        .depth_bias_clamp(0.0)
+        .depth_bias_slope_factor(0.0)
+        .build();
+    info
+}
+
+fn get_multisampling_state_create_info() -> PipelineMultisampleStateCreateInfo {
+    let info = PipelineMultisampleStateCreateInfo::builder()
+        .sample_shading_enable(false)
+        .rasterization_samples(SampleCountFlags::TYPE_1)
+        .min_sample_shading(1.0)
+        .sample_mask(&[])
+        .alpha_to_coverage_enable(false)
+        .alpha_to_one_enable(false)
+        .build();
+    info
+}
+
+fn get_color_blend_attachment_state() -> PipelineColorBlendAttachmentState {
+    let info = PipelineColorBlendAttachmentState::builder()
+        .color_write_mask(
+            ColorComponentFlags::R
+                | ColorComponentFlags::G
+                | ColorComponentFlags::B
+                | ColorComponentFlags::A,
+        )
+        .blend_enable(false)
+        .build();
+    info
+}
+
+fn get_pipeline_layout_create_info() -> PipelineLayoutCreateInfo {
+    let info = PipelineLayoutCreateInfo::builder().build();
+    info
+}
+
 fn main() {
+    env_logger::init();
+    log::warn!("foobar");
+
     let event_loop = EventLoop::new();
     let window = VulkanApp::init_window(&event_loop);
 
