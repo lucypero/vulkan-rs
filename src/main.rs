@@ -3,8 +3,10 @@
 mod platforms;
 
 use std::borrow::Borrow;
+use std::collections::VecDeque;
 use std::ffi::{c_void, CStr, CString};
 use std::fs::File;
+use std::mem;
 use std::os::raw::c_char;
 use std::path::Path;
 use std::str::FromStr;
@@ -97,7 +99,29 @@ impl PipelineBuilder {
     }
 }
 
-struct VulkanApp {
+struct DeletionQueue
+{
+    deletors: VecDeque<Box<dyn Fn(&VulkanApp)>>
+}
+
+impl DeletionQueue {
+
+    fn push_function<T>(&mut self, function: T)
+    where T: Fn(&VulkanApp) + 'static {
+        self.deletors.push_back(Box::new(function));
+    }
+
+    fn flush(&mut self, app: &VulkanApp) {
+		// reverse iterate the deletion queue to execute all the functions
+        for deletor in &self.deletors {
+            deletor(app);
+        }
+
+        self.deletors.clear();
+    }
+}
+struct VulkanApp
+{
     entry: Entry,
     instance: ash::Instance,
     debug_utils_fn: DebugUtils,
@@ -126,6 +150,7 @@ struct VulkanApp {
     frame_number: i64,
 
     selected_shader: i32,
+    main_deletion_queue: DeletionQueue,
 }
 
 struct Queues {
@@ -137,6 +162,11 @@ struct Queues {
 
 impl VulkanApp {
     pub unsafe fn new(window: &Window) -> VulkanApp {
+
+        let main_deletion_queue = DeletionQueue {
+            deletors: VecDeque::new(),
+        };
+
         // init vulkan stuff
 
         let entry = ash::Entry::new().unwrap();
@@ -275,6 +305,7 @@ impl VulkanApp {
             .create_swapchain(&swapchain_create_info, None)
             .unwrap();
 
+
         let swapchain_images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
         let mut swapchain_image_views: Vec<ImageView> = Vec::with_capacity(swapchain_images.len());
 
@@ -375,6 +406,7 @@ impl VulkanApp {
 
         let render_pass = device.create_render_pass(&render_pass_info, None).unwrap();
 
+
         //frame buffers
         let mut framebuffers: Vec<Framebuffer> = Vec::with_capacity(swapchain_images.len());
         for swapchain_image in &swapchain_image_views {
@@ -388,6 +420,8 @@ impl VulkanApp {
 
             let fb = device.create_framebuffer(&fb_info, None).unwrap();
             framebuffers.push(fb);
+
+
         }
 
         //initializing semaphores and fence
@@ -414,7 +448,7 @@ impl VulkanApp {
         let (triangle_pipeline_layout, triangle_pipeline, red_triangle_pipeline) =
             init_pipelines(&device, window_extent, render_pass);
 
-        let app = VulkanApp {
+        let mut app = VulkanApp {
             entry,
             instance,
             debug_utils_fn,
@@ -441,7 +475,29 @@ impl VulkanApp {
             triangle_pipeline,
             red_triangle_pipeline,
             selected_shader: 0,
+            main_deletion_queue
         };
+
+        app.main_deletion_queue.push_function(|app| {
+            app.swapchain_loader.destroy_swapchain(app.swapchain, None);
+            app.device.destroy_render_pass(app.render_pass, None);
+            for fb in &app.framebuffers {
+                app.device.destroy_framebuffer(*fb, None);
+            }
+            for image_view in &app.swapchain_image_views {
+                app.device.destroy_image_view(*image_view, None);
+            }
+
+            app.device.destroy_command_pool(app.command_pool, None);
+            app.device.destroy_fence(app.render_fence, None);
+            app.device.destroy_semaphore(app.present_semaphore, None);
+            app.device.destroy_semaphore(app.render_semaphore, None);
+
+            app.device.destroy_pipeline(app.red_triangle_pipeline, None);
+            app.device.destroy_pipeline(app.triangle_pipeline, None);
+            app.device.destroy_pipeline_layout(app.triangle_pipeline_layout, None);
+        });
+
         app
     }
 
@@ -553,13 +609,6 @@ impl VulkanApp {
         self.frame_number += 1;
     }
 
-    fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
-        winit::window::WindowBuilder::new()
-            .with_title(WINDOW_TITLE)
-            .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .build(event_loop)
-            .expect("Failed to create window.")
-    }
 
     pub fn main_loop(mut self, mut event_loop: EventLoop<()>, window: Window) {
         event_loop.run_return(move |event, _, control_flow| match event {
@@ -595,10 +644,10 @@ impl VulkanApp {
         })
     }
 
-    pub unsafe fn set_name<T: vk::Handle>(&self, object: T, name: &str) -> VkResult<()> {
+    pub unsafe fn set_name<H: vk::Handle>(&self, object: H, name: &str) -> VkResult<()> {
         let name = CString::new(name).unwrap();
         let name_info = vk::DebugUtilsObjectNameInfoEXT::builder()
-            .object_type(T::TYPE)
+            .object_type(H::TYPE)
             .object_handle(object.as_raw())
             .object_name(&name);
         self.debug_utils_fn
@@ -661,32 +710,37 @@ fn debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXTBu
         .pfn_user_callback(Some(debug_utils_callback))
 }
 
-impl Drop for VulkanApp {
+impl Drop for VulkanApp
+{
     fn drop(&mut self) {
         unsafe {
             self.device
                 .wait_for_fences(&[self.render_fence], true, 1000000000)
                 .unwrap();
 
-            self.device.destroy_command_pool(self.command_pool, None);
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
-            self.device.destroy_render_pass(self.render_pass, None);
+            //NOTE(lucypero): deletion queue in app is empty after this!!!
+            let mut main_deletion_queue = mem::replace(&mut self.main_deletion_queue, DeletionQueue{ deletors: VecDeque::new() });
+            main_deletion_queue.flush(&self);
 
-            for fb in &self.framebuffers {
-                self.device.destroy_framebuffer(*fb, None);
-            }
-            for image_view in &self.swapchain_image_views {
-                self.device.destroy_image_view(*image_view, None);
-            }
+            // self.device.destroy_command_pool(self.command_pool, None);
+            // self.swapchain_loader
+            //     .destroy_swapchain(self.swapchain, None);
+            // self.device.destroy_render_pass(self.render_pass, None);
 
-            self.device.destroy_semaphore(self.present_semaphore, None);
-            self.device.destroy_semaphore(self.render_semaphore, None);
-            self.device.destroy_fence(self.render_fence, None);
+            // for fb in &self.framebuffers {
+            //     self.device.destroy_framebuffer(*fb, None);
+            // }
+            // for image_view in &self.swapchain_image_views {
+            //     self.device.destroy_image_view(*image_view, None);
+            // }
 
-            self.device.destroy_pipeline(self.triangle_pipeline, None);
-            self.device
-                .destroy_pipeline_layout(self.triangle_pipeline_layout, None);
+            // self.device.destroy_semaphore(self.present_semaphore, None);
+            // self.device.destroy_semaphore(self.render_semaphore, None);
+            // self.device.destroy_fence(self.render_fence, None);
+
+            // self.device.destroy_pipeline(self.triangle_pipeline, None);
+            // self.device
+            //     .destroy_pipeline_layout(self.triangle_pipeline_layout, None);
 
             self.device.destroy_device(None);
             self.surface_fn.destroy_surface(self.surface, None);
@@ -818,6 +872,8 @@ unsafe fn init_pipelines(
     //destroy shader modules
     device.destroy_shader_module(triangle_frag_shader, None);
     device.destroy_shader_module(triangle_vertex_shader, None);
+    device.destroy_shader_module(red_triangle_frag_shader, None);
+    device.destroy_shader_module(red_triangle_vertex_shader, None);
 
     (pipeline_layout, triangle_pipeline, red_triangle_pipeline)
 }
@@ -900,15 +956,23 @@ fn get_pipeline_layout_create_info() -> PipelineLayoutCreateInfo {
     info
 }
 
+fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
+    winit::window::WindowBuilder::new()
+        .with_title(WINDOW_TITLE)
+        .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+        .build(event_loop)
+        .expect("Failed to create window.")
+}
+
 fn main() {
     env_logger::init();
     log::warn!("foobar");
 
     let event_loop = EventLoop::new();
-    let window = VulkanApp::init_window(&event_loop);
+    let window = init_window(&event_loop);
 
     unsafe {
-        let vulkan_app = VulkanApp::new(&window);
+        let vulkan_app: VulkanApp = VulkanApp::new(&window);
         vulkan_app.main_loop(event_loop, window);
     }
 }
