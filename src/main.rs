@@ -7,13 +7,36 @@ use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::ffi::{c_void, CStr, CString};
 use std::fs::File;
-use std::mem;
+use std::{mem, slice};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::str::FromStr;
 
+use bytemuck::{Pod, Zeroable};
+
 use ash::prelude::VkResult;
-use ash::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, BufferCreateInfo, BufferUsageFlags, ClearColorValue, ClearValue, ColorComponentFlags, ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR, CullModeFlags, DeviceSize, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, FrontFace, GraphicsPipelineCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, LogicOp, Offset2D, Pipeline, PipelineBindPoint, PipelineCache, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineStageFlags, PipelineVertexInputStateCreateInfo, PipelineVertexInputStateCreateInfoBuilder, PipelineViewportStateCreateInfo, PolygonMode, PresentInfoKHR, PresentModeKHR, PrimitiveTopology, Rect2D, RenderPass, RenderPassBeginInfo, RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule, ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription, SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR, Viewport};
+use ash::vk::{
+    AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+    BufferCreateInfo, BufferUsageFlags, ClearColorValue, ClearValue, ColorComponentFlags,
+    ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo,
+    CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool,
+    CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping,
+    ComponentSwizzle, CompositeAlphaFlagsKHR, CullModeFlags, DeviceSize, Extent2D, Fence,
+    FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, FrontFace,
+    GraphicsPipelineCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange,
+    ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, LogicOp, Offset2D, Pipeline,
+    PipelineBindPoint, PipelineCache, PipelineColorBlendAttachmentState,
+    PipelineColorBlendStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout,
+    PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo,
+    PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineStageFlags,
+    PipelineVertexInputStateCreateInfo, PipelineVertexInputStateCreateInfoBuilder,
+    PipelineViewportStateCreateInfo, PolygonMode, PresentInfoKHR, PresentModeKHR,
+    PrimitiveTopology, PushConstantRange, Rect2D, RenderPass, RenderPassBeginInfo,
+    RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule,
+    ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription,
+    SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR,
+    Viewport,
+};
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
     vk::{self, Handle},
@@ -22,7 +45,7 @@ use ash::{
 
 use image::ImageFormat;
 use mesh::Mesh;
-use nalgebra_glm::{vec3, Vec3};
+use nalgebra_glm::{Mat4, Vec3, Vec4, mat4, vec1, vec3, vec4};
 use vk_mem::ffi::VkBuffer;
 use vk_mem::AllocationInfo;
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
@@ -134,6 +157,7 @@ struct VulkanApp {
     queues: Queues,
 
     triangle_pipeline_layout: PipelineLayout,
+    mesh_pipeline_layout: PipelineLayout,
 
     triangle_pipeline: Pipeline,
     red_triangle_pipeline: Pipeline,
@@ -146,6 +170,13 @@ struct VulkanApp {
     selected_shader: i32,
     main_deletion_queue: DeletionQueue,
     allocator: vk_mem::Allocator,
+}
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct MeshPushConstants {
+    data: Vec4,
+    render_matrix: Mat4,
 }
 
 struct Queues {
@@ -435,8 +466,13 @@ impl VulkanApp {
             height: WINDOW_HEIGHT,
         };
 
-        let (triangle_pipeline_layout, triangle_pipeline, red_triangle_pipeline, mesh_pipeline) =
-            init_pipelines(&device, window_extent, render_pass);
+        let (
+            triangle_pipeline_layout,
+            mesh_pipeline_layout,
+            triangle_pipeline,
+            red_triangle_pipeline,
+            mesh_pipeline,
+        ) = init_pipelines(&device, window_extent, render_pass);
 
         //allocator
 
@@ -540,7 +576,8 @@ impl VulkanApp {
             main_deletion_queue,
             allocator,
             triangle_mesh,
-            mesh_pipeline
+            mesh_pipeline,
+            mesh_pipeline_layout,
         };
 
         app.main_deletion_queue.push_function(|app| {
@@ -568,6 +605,8 @@ impl VulkanApp {
             app.device.destroy_pipeline(app.mesh_pipeline, None);
             app.device
                 .destroy_pipeline_layout(app.triangle_pipeline_layout, None);
+            app.device
+                .destroy_pipeline_layout(app.mesh_pipeline_layout, None);
         });
 
         app
@@ -650,13 +689,42 @@ impl VulkanApp {
         }
 
         //bind the mesh vertex buffer with offset 0
-        let offset : DeviceSize = 0;
-        self.device.cmd_bind_vertex_buffers(self.main_cmd_buffer, 0, &[self.triangle_mesh.vertex_buffer.buffer], &[offset]);
+        let offset: DeviceSize = 0;
+        self.device.cmd_bind_vertex_buffers(
+            self.main_cmd_buffer,
+            0,
+            &[self.triangle_mesh.vertex_buffer.buffer],
+            &[offset],
+        );
 
-        self.device.cmd_draw(self.main_cmd_buffer, self.triangle_mesh.vertices.len() as u32, 1, 0, 0);
+        //make a model view matrix for rendering the object
+
+        //camera position
+        let cam_pos = vec3(0., 0., -2.);
+        let view = nalgebra_glm::translate(&nalgebra_glm::identity(), &cam_pos);
+        //camera projection
+        // let projection = nalgebra_glm::perspective(1700. / 900., 1.22173, 0.1, 200.);
+        let projection = nalgebra_glm::perspective(WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32, nalgebra_glm::radians(&vec1(90.))[0], 0.1, 200.);
+        // model rotations
+        let model = nalgebra_glm::rotate::<f32>(&nalgebra_glm::identity(), nalgebra_glm::radians(&vec1(self.frame_number as f32 * 0.4))[0], &vec3(0.,1.,0.));
+
+        //calculate final mesh matrix
+        let mesh_matrix : Mat4 = projection * view * model;
+
+        let constants = MeshPushConstants { data: vec4(0., 0., 0., 0.), render_matrix: mesh_matrix };
+
+        //upload the matrix to the GPU via push constants
+        self.device.cmd_push_constants(self.main_cmd_buffer, self.mesh_pipeline_layout, ShaderStageFlags::VERTEX, 0, bytemuck::cast_slice(&[constants]));
+
+        self.device.cmd_draw(
+            self.main_cmd_buffer,
+            self.triangle_mesh.vertices.len() as u32,
+            1,
+            0,
+            0,
+        );
 
         //finalize the render pass
-
         self.device.cmd_end_render_pass(self.main_cmd_buffer);
         self.device
             .end_command_buffer(self.main_cmd_buffer)
@@ -831,7 +899,7 @@ unsafe fn init_pipelines(
     device: &ash::Device,
     window_extent: Extent2D,
     render_pass: RenderPass,
-) -> (PipelineLayout, Pipeline, Pipeline, Pipeline) {
+) -> (PipelineLayout, PipelineLayout, Pipeline, Pipeline, Pipeline) {
     let triangle_vertex_shader =
         load_shader_module(device, "shaders/colored_triangle.vert.spv".to_string()).unwrap();
 
@@ -844,7 +912,7 @@ unsafe fn init_pipelines(
     let red_triangle_frag_shader =
         load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
 
-    let mesh_vert_shader = 
+    let mesh_vert_shader =
         load_shader_module(device, "shaders/tri_mesh.vert.spv".to_string()).unwrap();
 
     //build the stage-create-info for both vertex and fragment stages. This lets the pipeline know the shader modules per stage
@@ -932,14 +1000,28 @@ unsafe fn init_pipelines(
             &name,
         ));
 
-
     let red_triangle_pipeline = pipeline_builder.build_pipeline(device, render_pass);
 
     // making mesh triangle pipeline
 
+    //push constants
+    let push_constant = PushConstantRange::builder()
+        .offset(0)
+        .size(std::mem::size_of::<MeshPushConstants>() as u32)
+        .stage_flags(ShaderStageFlags::VERTEX)
+        .build();
+
+    let mesh_pipeline_layout_info = PipelineLayoutCreateInfo::builder()
+        .push_constant_ranges(&[push_constant])
+        .build();
+
+    let mesh_pipeline_layout = device
+        .create_pipeline_layout(&mesh_pipeline_layout_info, None)
+        .unwrap();
+
     let vertex_description = Vertex::get_vertex_description();
 
-	//connect the pipeline builder vertex input info to the one we get from Vertex
+    //connect the pipeline builder vertex input info to the one we get from Vertex
     pipeline_builder.vertex_input_info = PipelineVertexInputStateCreateInfo::builder()
         .vertex_attribute_descriptions(&vertex_description.attributes)
         .vertex_binding_descriptions(&vertex_description.bindings)
@@ -962,6 +1044,7 @@ unsafe fn init_pipelines(
             &name,
         ));
 
+    pipeline_builder.pipeline_layout = mesh_pipeline_layout;
     let mesh_pipeline = pipeline_builder.build_pipeline(device, render_pass);
 
     //destroy shader modules
@@ -971,7 +1054,13 @@ unsafe fn init_pipelines(
     device.destroy_shader_module(red_triangle_vertex_shader, None);
     device.destroy_shader_module(mesh_vert_shader, None);
 
-    (pipeline_layout, triangle_pipeline, red_triangle_pipeline, mesh_pipeline)
+    (
+        pipeline_layout,
+        mesh_pipeline_layout,
+        triangle_pipeline,
+        red_triangle_pipeline,
+        mesh_pipeline,
+    )
 }
 
 fn get_pipeline_shader_stage_create_info(

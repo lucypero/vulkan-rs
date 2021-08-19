@@ -15,7 +15,6 @@ pub struct VertexInputDescription {
     pub flags: PipelineVertexInputStateCreateFlags,
 }
 
-//NOTE(lucypero): don't change the order of the fields!!!
 #[repr(C, packed)]
 pub struct Vertex {
     pub position: Vec3,
