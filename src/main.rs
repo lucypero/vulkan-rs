@@ -1,5 +1,6 @@
 #![allow(unused_imports, dead_code)]
 
+mod mesh;
 mod platforms;
 
 use std::borrow::Borrow;
@@ -12,27 +13,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use ash::prelude::VkResult;
-use ash::vk::{
-    AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
-    ClearColorValue, ClearValue, ColorComponentFlags, ColorSpaceKHR, CommandBuffer,
-    CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags,
-    CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo,
-    CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR,
-    CullModeFlags, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer,
-    FramebufferCreateInfo, FrontFace, GraphicsPipelineCreateInfo, Image, ImageAspectFlags,
-    ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo,
-    ImageViewType, LogicOp, Offset2D, Pipeline, PipelineBindPoint, PipelineCache,
-    PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo,
-    PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo,
-    PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo,
-    PipelineShaderStageCreateInfo, PipelineStageFlags, PipelineVertexInputStateCreateInfo,
-    PipelineVertexInputStateCreateInfoBuilder, PipelineViewportStateCreateInfo, PolygonMode,
-    PresentInfoKHR, PresentModeKHR, PrimitiveTopology, Rect2D, RenderPass, RenderPassBeginInfo,
-    RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule,
-    ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription,
-    SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR,
-    Viewport,
-};
+use ash::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, BufferCreateInfo, BufferUsageFlags, ClearColorValue, ClearValue, ColorComponentFlags, ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR, CullModeFlags, DeviceSize, Extent2D, Fence, FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, FrontFace, GraphicsPipelineCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, LogicOp, Offset2D, Pipeline, PipelineBindPoint, PipelineCache, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineStageFlags, PipelineVertexInputStateCreateInfo, PipelineVertexInputStateCreateInfoBuilder, PipelineViewportStateCreateInfo, PolygonMode, PresentInfoKHR, PresentModeKHR, PrimitiveTopology, Rect2D, RenderPass, RenderPassBeginInfo, RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule, ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription, SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR, Viewport};
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
     vk::{self, Handle},
@@ -40,10 +21,16 @@ use ash::{
 };
 
 use image::ImageFormat;
+use mesh::Mesh;
+use nalgebra_glm::{vec3, Vec3};
+use vk_mem::ffi::VkBuffer;
+use vk_mem::AllocationInfo;
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::run_return::EventLoopExtRunReturn;
 use winit::window::Window;
+
+use crate::mesh::Vertex;
 
 // Constants
 const WINDOW_TITLE: &'static str = "vulkan-rs";
@@ -98,21 +85,25 @@ impl PipelineBuilder {
         new_pipeline[0]
     }
 }
+pub struct AllocatedBuffer {
+    pub buffer: ash::vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+}
 
-struct DeletionQueue
-{
-    deletors: VecDeque<Box<dyn Fn(&VulkanApp)>>
+struct DeletionQueue {
+    deletors: VecDeque<Box<dyn Fn(&VulkanApp)>>,
 }
 
 impl DeletionQueue {
-
     fn push_function<T>(&mut self, function: T)
-    where T: Fn(&VulkanApp) + 'static {
+    where
+        T: Fn(&VulkanApp) + 'static,
+    {
         self.deletors.push_back(Box::new(function));
     }
 
     fn flush(&mut self, app: &VulkanApp) {
-		// reverse iterate the deletion queue to execute all the functions
+        // reverse iterate the deletion queue to execute all the functions
         for deletor in &self.deletors {
             deletor(app);
         }
@@ -120,8 +111,7 @@ impl DeletionQueue {
         self.deletors.clear();
     }
 }
-struct VulkanApp
-{
+struct VulkanApp {
     entry: Entry,
     instance: ash::Instance,
     debug_utils_fn: DebugUtils,
@@ -142,15 +132,20 @@ struct VulkanApp
     render_semaphore: Semaphore,
     render_fence: Fence,
     queues: Queues,
+
     triangle_pipeline_layout: PipelineLayout,
+
     triangle_pipeline: Pipeline,
     red_triangle_pipeline: Pipeline,
+    mesh_pipeline: Pipeline,
+    triangle_mesh: Mesh,
 
     // "game" state
     frame_number: i64,
 
     selected_shader: i32,
     main_deletion_queue: DeletionQueue,
+    allocator: vk_mem::Allocator,
 }
 
 struct Queues {
@@ -162,7 +157,6 @@ struct Queues {
 
 impl VulkanApp {
     pub unsafe fn new(window: &Window) -> VulkanApp {
-
         let main_deletion_queue = DeletionQueue {
             deletors: VecDeque::new(),
         };
@@ -305,7 +299,6 @@ impl VulkanApp {
             .create_swapchain(&swapchain_create_info, None)
             .unwrap();
 
-
         let swapchain_images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
         let mut swapchain_image_views: Vec<ImageView> = Vec::with_capacity(swapchain_images.len());
 
@@ -406,7 +399,6 @@ impl VulkanApp {
 
         let render_pass = device.create_render_pass(&render_pass_info, None).unwrap();
 
-
         //frame buffers
         let mut framebuffers: Vec<Framebuffer> = Vec::with_capacity(swapchain_images.len());
         for swapchain_image in &swapchain_image_views {
@@ -420,8 +412,6 @@ impl VulkanApp {
 
             let fb = device.create_framebuffer(&fb_info, None).unwrap();
             framebuffers.push(fb);
-
-
         }
 
         //initializing semaphores and fence
@@ -445,8 +435,80 @@ impl VulkanApp {
             height: WINDOW_HEIGHT,
         };
 
-        let (triangle_pipeline_layout, triangle_pipeline, red_triangle_pipeline) =
+        let (triangle_pipeline_layout, triangle_pipeline, red_triangle_pipeline, mesh_pipeline) =
             init_pipelines(&device, window_extent, render_pass);
+
+        //allocator
+
+        // Create the buffer (GPU only, 16KiB in this example)
+        // let create_info = vk_mem::AllocationCreateInfo {
+        //     usage: vk_mem::MemoryUsage::GpuOnly,
+        //     ..Default::default()
+        // };
+
+        let allocator_info = vk_mem::AllocatorCreateInfo {
+            physical_device: physical_device,
+            device: device.clone(),
+            instance: instance.clone(),
+            ..Default::default()
+        };
+
+        let allocator = vk_mem::Allocator::new(&allocator_info).unwrap();
+
+        //loading mesh
+
+        // vertices
+        let mesh_vertices = vec![
+            Vertex {
+                position: vec3(1., 1., 0.),
+                color: vec3(0., 1., 0.),
+                normal: Vec3::default(),
+            },
+            Vertex {
+                position: vec3(-1., 1., 0.),
+                color: vec3(0., 1., 0.),
+                normal: Vec3::default(),
+            },
+            Vertex {
+                position: vec3(0., -1., 0.),
+                color: vec3(0., 1., 0.),
+                normal: Vec3::default(),
+            },
+        ];
+
+        //creating vertex buffer
+
+        let (buffer, allocation, _allocation_info) = allocator
+            .create_buffer(
+                &BufferCreateInfo::builder()
+                    .size((mesh_vertices.len() * mem::size_of::<Vertex>()) as u64)
+                    .usage(BufferUsageFlags::VERTEX_BUFFER)
+                    .build(),
+                &vk_mem::AllocationCreateInfo {
+                    usage: vk_mem::MemoryUsage::CpuToGpu,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let triangle_mesh = Mesh {
+            vertices: mesh_vertices,
+            vertex_buffer: AllocatedBuffer {
+                buffer: buffer,
+                allocation: allocation,
+            },
+        };
+
+        //copy vertex data to gpu memory
+        let data: *mut u8 = allocator.map_memory(&allocation).unwrap();
+
+        std::ptr::copy_nonoverlapping(
+            triangle_mesh.vertices.as_ptr().cast(),
+            data,
+            std::mem::size_of::<Vertex>() * triangle_mesh.vertices.len(),
+        );
+
+        allocator.unmap_memory(&allocation);
 
         let mut app = VulkanApp {
             entry,
@@ -475,7 +537,10 @@ impl VulkanApp {
             triangle_pipeline,
             red_triangle_pipeline,
             selected_shader: 0,
-            main_deletion_queue
+            main_deletion_queue,
+            allocator,
+            triangle_mesh,
+            mesh_pipeline
         };
 
         app.main_deletion_queue.push_function(|app| {
@@ -493,9 +558,16 @@ impl VulkanApp {
             app.device.destroy_semaphore(app.present_semaphore, None);
             app.device.destroy_semaphore(app.render_semaphore, None);
 
+            app.allocator.destroy_buffer(
+                app.triangle_mesh.vertex_buffer.buffer,
+                &app.triangle_mesh.vertex_buffer.allocation,
+            );
+
             app.device.destroy_pipeline(app.red_triangle_pipeline, None);
             app.device.destroy_pipeline(app.triangle_pipeline, None);
-            app.device.destroy_pipeline_layout(app.triangle_pipeline_layout, None);
+            app.device.destroy_pipeline(app.mesh_pipeline, None);
+            app.device
+                .destroy_pipeline_layout(app.triangle_pipeline_layout, None);
         });
 
         app
@@ -567,7 +639,7 @@ impl VulkanApp {
             self.device.cmd_bind_pipeline(
                 self.main_cmd_buffer,
                 PipelineBindPoint::GRAPHICS,
-                self.triangle_pipeline,
+                self.mesh_pipeline,
             );
         } else {
             self.device.cmd_bind_pipeline(
@@ -577,7 +649,11 @@ impl VulkanApp {
             );
         }
 
-        self.device.cmd_draw(self.main_cmd_buffer, 3, 1, 0, 0);
+        //bind the mesh vertex buffer with offset 0
+        let offset : DeviceSize = 0;
+        self.device.cmd_bind_vertex_buffers(self.main_cmd_buffer, 0, &[self.triangle_mesh.vertex_buffer.buffer], &[offset]);
+
+        self.device.cmd_draw(self.main_cmd_buffer, self.triangle_mesh.vertices.len() as u32, 1, 0, 0);
 
         //finalize the render pass
 
@@ -608,7 +684,6 @@ impl VulkanApp {
             .unwrap();
         self.frame_number += 1;
     }
-
 
     pub fn main_loop(mut self, mut event_loop: EventLoop<()>, window: Window) {
         event_loop.run_return(move |event, _, control_flow| match event {
@@ -710,8 +785,7 @@ fn debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXTBu
         .pfn_user_callback(Some(debug_utils_callback))
 }
 
-impl Drop for VulkanApp
-{
+impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
             self.device
@@ -719,28 +793,15 @@ impl Drop for VulkanApp
                 .unwrap();
 
             //NOTE(lucypero): deletion queue in app is empty after this!!!
-            let mut main_deletion_queue = mem::replace(&mut self.main_deletion_queue, DeletionQueue{ deletors: VecDeque::new() });
+            let mut main_deletion_queue = mem::replace(
+                &mut self.main_deletion_queue,
+                DeletionQueue {
+                    deletors: VecDeque::new(),
+                },
+            );
+
             main_deletion_queue.flush(&self);
-
-            // self.device.destroy_command_pool(self.command_pool, None);
-            // self.swapchain_loader
-            //     .destroy_swapchain(self.swapchain, None);
-            // self.device.destroy_render_pass(self.render_pass, None);
-
-            // for fb in &self.framebuffers {
-            //     self.device.destroy_framebuffer(*fb, None);
-            // }
-            // for image_view in &self.swapchain_image_views {
-            //     self.device.destroy_image_view(*image_view, None);
-            // }
-
-            // self.device.destroy_semaphore(self.present_semaphore, None);
-            // self.device.destroy_semaphore(self.render_semaphore, None);
-            // self.device.destroy_fence(self.render_fence, None);
-
-            // self.device.destroy_pipeline(self.triangle_pipeline, None);
-            // self.device
-            //     .destroy_pipeline_layout(self.triangle_pipeline_layout, None);
+            self.allocator.destroy();
 
             self.device.destroy_device(None);
             self.surface_fn.destroy_surface(self.surface, None);
@@ -770,7 +831,7 @@ unsafe fn init_pipelines(
     device: &ash::Device,
     window_extent: Extent2D,
     render_pass: RenderPass,
-) -> (PipelineLayout, Pipeline, Pipeline) {
+) -> (PipelineLayout, Pipeline, Pipeline, Pipeline) {
     let triangle_vertex_shader =
         load_shader_module(device, "shaders/colored_triangle.vert.spv".to_string()).unwrap();
 
@@ -782,6 +843,9 @@ unsafe fn init_pipelines(
 
     let red_triangle_frag_shader =
         load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
+
+    let mesh_vert_shader = 
+        load_shader_module(device, "shaders/tri_mesh.vert.spv".to_string()).unwrap();
 
     //build the stage-create-info for both vertex and fragment stages. This lets the pipeline know the shader modules per stage
     let name = CString::new("main").unwrap();
@@ -835,7 +899,7 @@ unsafe fn init_pipelines(
         .expect("could not create pipeline layout");
 
     //finally build the pipeline
-    let mut triangle_pipeline_builder = PipelineBuilder {
+    let mut pipeline_builder = PipelineBuilder {
         shader_stages,
         vertex_input_info,
         input_assembly,
@@ -847,19 +911,20 @@ unsafe fn init_pipelines(
         pipeline_layout,
     };
 
-    let triangle_pipeline = triangle_pipeline_builder.build_pipeline(device, render_pass);
+    let triangle_pipeline = pipeline_builder.build_pipeline(device, render_pass);
 
-    triangle_pipeline_builder.shader_stages.clear();
-    triangle_pipeline_builder.shader_stages.clear();
+    //making red triangle pipeline
 
-    triangle_pipeline_builder
+    pipeline_builder.shader_stages.clear();
+
+    pipeline_builder
         .shader_stages
         .push(get_pipeline_shader_stage_create_info(
             ShaderStageFlags::VERTEX,
             red_triangle_vertex_shader,
             &name,
         ));
-    triangle_pipeline_builder
+    pipeline_builder
         .shader_stages
         .push(get_pipeline_shader_stage_create_info(
             ShaderStageFlags::FRAGMENT,
@@ -867,15 +932,46 @@ unsafe fn init_pipelines(
             &name,
         ));
 
-    let red_triangle_pipeline = triangle_pipeline_builder.build_pipeline(device, render_pass);
+
+    let red_triangle_pipeline = pipeline_builder.build_pipeline(device, render_pass);
+
+    // making mesh triangle pipeline
+
+    let vertex_description = Vertex::get_vertex_description();
+
+	//connect the pipeline builder vertex input info to the one we get from Vertex
+    pipeline_builder.vertex_input_info = PipelineVertexInputStateCreateInfo::builder()
+        .vertex_attribute_descriptions(&vertex_description.attributes)
+        .vertex_binding_descriptions(&vertex_description.bindings)
+        .build();
+
+    pipeline_builder.shader_stages.clear();
+
+    pipeline_builder
+        .shader_stages
+        .push(get_pipeline_shader_stage_create_info(
+            ShaderStageFlags::VERTEX,
+            mesh_vert_shader,
+            &name,
+        ));
+    pipeline_builder
+        .shader_stages
+        .push(get_pipeline_shader_stage_create_info(
+            ShaderStageFlags::FRAGMENT,
+            triangle_frag_shader,
+            &name,
+        ));
+
+    let mesh_pipeline = pipeline_builder.build_pipeline(device, render_pass);
 
     //destroy shader modules
     device.destroy_shader_module(triangle_frag_shader, None);
     device.destroy_shader_module(triangle_vertex_shader, None);
     device.destroy_shader_module(red_triangle_frag_shader, None);
     device.destroy_shader_module(red_triangle_vertex_shader, None);
+    device.destroy_shader_module(mesh_vert_shader, None);
 
-    (pipeline_layout, triangle_pipeline, red_triangle_pipeline)
+    (pipeline_layout, triangle_pipeline, red_triangle_pipeline, mesh_pipeline)
 }
 
 fn get_pipeline_shader_stage_create_info(
