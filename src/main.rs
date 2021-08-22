@@ -170,6 +170,7 @@ struct VulkanApp {
     selected_shader: i32,
     main_deletion_queue: DeletionQueue,
     allocator: vk_mem::Allocator,
+    monkey_mesh: Mesh,
 }
 
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -496,55 +497,25 @@ impl VulkanApp {
         // vertices
         let mesh_vertices = vec![
             Vertex {
-                position: vec3(1., 1., 0.),
-                color: vec3(0., 1., 0.),
-                normal: Vec3::default(),
+                position: vec4(1., 1., 0., 0.),
+                color: vec4(1., 0., 0., 0.),
+                normal: Vec4::default(),
             },
             Vertex {
-                position: vec3(-1., 1., 0.),
-                color: vec3(0., 1., 0.),
-                normal: Vec3::default(),
+                position: vec4(-1., 1., 0., 0.),
+                color: vec4(0., 1., 0., 0.),
+                normal: Vec4::default(),
             },
             Vertex {
-                position: vec3(0., -1., 0.),
-                color: vec3(0., 1., 0.),
-                normal: Vec3::default(),
+                position: vec4(0., -1., 0., 0.),
+                color: vec4(0., 0., 1., 0.),
+                normal: Vec4::default(),
             },
         ];
 
         //creating vertex buffer
-
-        let (buffer, allocation, _allocation_info) = allocator
-            .create_buffer(
-                &BufferCreateInfo::builder()
-                    .size((mesh_vertices.len() * mem::size_of::<Vertex>()) as u64)
-                    .usage(BufferUsageFlags::VERTEX_BUFFER)
-                    .build(),
-                &vk_mem::AllocationCreateInfo {
-                    usage: vk_mem::MemoryUsage::CpuToGpu,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        let triangle_mesh = Mesh {
-            vertices: mesh_vertices,
-            vertex_buffer: AllocatedBuffer {
-                buffer: buffer,
-                allocation: allocation,
-            },
-        };
-
-        //copy vertex data to gpu memory
-        let data: *mut u8 = allocator.map_memory(&allocation).unwrap();
-
-        std::ptr::copy_nonoverlapping(
-            triangle_mesh.vertices.as_ptr().cast(),
-            data,
-            std::mem::size_of::<Vertex>() * triangle_mesh.vertices.len(),
-        );
-
-        allocator.unmap_memory(&allocation);
+        let triangle_mesh = Mesh::new(mesh_vertices, &allocator);
+        let monkey_mesh = Mesh::load_from_obj("assets/monkey_flat.obj", &allocator);
 
         let mut app = VulkanApp {
             entry,
@@ -578,6 +549,7 @@ impl VulkanApp {
             triangle_mesh,
             mesh_pipeline,
             mesh_pipeline_layout,
+            monkey_mesh
         };
 
         app.main_deletion_queue.push_function(|app| {
@@ -598,6 +570,10 @@ impl VulkanApp {
             app.allocator.destroy_buffer(
                 app.triangle_mesh.vertex_buffer.buffer,
                 &app.triangle_mesh.vertex_buffer.allocation,
+            );
+            app.allocator.destroy_buffer(
+                app.monkey_mesh.vertex_buffer.buffer,
+                &app.monkey_mesh.vertex_buffer.allocation,
             );
 
             app.device.destroy_pipeline(app.red_triangle_pipeline, None);
@@ -693,7 +669,7 @@ impl VulkanApp {
         self.device.cmd_bind_vertex_buffers(
             self.main_cmd_buffer,
             0,
-            &[self.triangle_mesh.vertex_buffer.buffer],
+            &[self.monkey_mesh.vertex_buffer.buffer],
             &[offset],
         );
 
@@ -704,7 +680,9 @@ impl VulkanApp {
         let view = nalgebra_glm::translate(&nalgebra_glm::identity(), &cam_pos);
         //camera projection
         // let projection = nalgebra_glm::perspective(1700. / 900., 1.22173, 0.1, 200.);
-        let projection = nalgebra_glm::perspective(WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32, nalgebra_glm::radians(&vec1(90.))[0], 0.1, 200.);
+        let mut projection = nalgebra_glm::perspective(WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32, nalgebra_glm::radians(&vec1(90.))[0], 0.1, 200.);
+        projection[5] *= -1.;
+
         // model rotations
         let model = nalgebra_glm::rotate::<f32>(&nalgebra_glm::identity(), nalgebra_glm::radians(&vec1(self.frame_number as f32 * 0.4))[0], &vec3(0.,1.,0.));
 
@@ -718,7 +696,7 @@ impl VulkanApp {
 
         self.device.cmd_draw(
             self.main_cmd_buffer,
-            self.triangle_mesh.vertices.len() as u32,
+            self.monkey_mesh.vertices.len() as u32,
             1,
             0,
             0,
