@@ -1330,7 +1330,7 @@ checksum = "5fecdca9a5291cc2b8dcf7dc02453fee791a280f3743cb0905f8822ae463b3fe"
 [[package]]
 name = "vk-mem"
 version = "0.2.3"
-source = "git+https://github.com/aclysma/vk-mem-rs.git?branch=ash-0.33-build-fix#253e69f17655d0e91f7ee1e49ad3c85ad1ea7f57"
+source = "git+https://github.com/aclysma/vk-mem-rs.git?rev=253e69f17655d0e91f7ee1e49ad3c85ad1ea7f57#253e69f17655d0e91f7ee1e49ad3c85ad1ea7f57"
 dependencies = [
  "ash",
  "bitflags",

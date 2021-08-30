@@ -7,45 +7,21 @@ use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::ffi::{c_void, CStr, CString};
 use std::fs::File;
-use std::{mem, slice};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::str::FromStr;
+use std::{mem, slice};
 
 use bytemuck::{Pod, Zeroable};
 
 use ash::prelude::VkResult;
-use ash::vk::{
-    AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
-    BufferCreateInfo, BufferUsageFlags, ClearColorValue, ClearValue, ColorComponentFlags,
-    ColorSpaceKHR, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo,
-    CommandBufferLevel, CommandBufferResetFlags, CommandBufferUsageFlags, CommandPool,
-    CommandPoolCreateFlags, CommandPoolCreateInfo, CommandPoolResetFlags, ComponentMapping,
-    ComponentSwizzle, CompositeAlphaFlagsKHR, CullModeFlags, DeviceSize, Extent2D, Fence,
-    FenceCreateFlags, FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, FrontFace,
-    GraphicsPipelineCreateInfo, Image, ImageAspectFlags, ImageLayout, ImageSubresourceRange,
-    ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, LogicOp, Offset2D, Pipeline,
-    PipelineBindPoint, PipelineCache, PipelineColorBlendAttachmentState,
-    PipelineColorBlendStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout,
-    PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo,
-    PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineStageFlags,
-    PipelineVertexInputStateCreateInfo, PipelineVertexInputStateCreateInfoBuilder,
-    PipelineViewportStateCreateInfo, PolygonMode, PresentInfoKHR, PresentModeKHR,
-    PrimitiveTopology, PushConstantRange, Rect2D, RenderPass, RenderPassBeginInfo,
-    RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateInfo, ShaderModule,
-    ShaderModuleCreateInfo, ShaderStageFlags, SubmitInfo, SubpassContents, SubpassDescription,
-    SurfaceFormatKHR, SwapchainCreateInfoKHR, SwapchainCreateInfoKHRBuilder, SwapchainKHR,
-    Viewport,
-};
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
-    vk::{self, Handle},
-    Entry,
+    vk, Entry,
 };
 
-use image::ImageFormat;
 use mesh::Mesh;
-use nalgebra_glm::{Mat4, Vec3, Vec4, mat4, vec1, vec3, vec4};
+use nalgebra_glm::{mat4, vec1, vec3, vec4, Mat4, Vec3, Vec4};
 use vk_mem::ffi::VkBuffer;
 use vk_mem::AllocationInfo;
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
@@ -61,33 +37,38 @@ const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 
 struct PipelineBuilder {
-    shader_stages: Vec<PipelineShaderStageCreateInfo>,
-    vertex_input_info: PipelineVertexInputStateCreateInfo,
-    input_assembly: PipelineInputAssemblyStateCreateInfo,
-    viewport: Viewport,
-    scissor: Rect2D,
-    rasterizer: PipelineRasterizationStateCreateInfo,
-    color_blend_attachment: PipelineColorBlendAttachmentState,
-    multisampling: PipelineMultisampleStateCreateInfo,
-    pipeline_layout: PipelineLayout,
+    shader_stages: Vec<vk::PipelineShaderStageCreateInfo>,
+    vertex_input_info: vk::PipelineVertexInputStateCreateInfo,
+    input_assembly: vk::PipelineInputAssemblyStateCreateInfo,
+    viewport: vk::Viewport,
+    scissor: vk::Rect2D,
+    rasterizer: vk::PipelineRasterizationStateCreateInfo,
+    color_blend_attachment: vk::PipelineColorBlendAttachmentState,
+    multisampling: vk::PipelineMultisampleStateCreateInfo,
+    pipeline_layout: vk::PipelineLayout,
+    depth_stencil: vk::PipelineDepthStencilStateCreateInfo
 }
 
 impl PipelineBuilder {
-    unsafe fn build_pipeline(&mut self, device: &ash::Device, render_pass: RenderPass) -> Pipeline {
-        let viewport_state = PipelineViewportStateCreateInfo::builder()
+    unsafe fn build_pipeline(
+        &mut self,
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+    ) -> vk::Pipeline {
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
             .viewports(&[self.viewport])
             .scissors(&[self.scissor])
             .build();
 
-        let color_blending = PipelineColorBlendStateCreateInfo::builder()
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
             .logic_op_enable(false)
-            .logic_op(LogicOp::COPY)
+            .logic_op(vk::LogicOp::COPY)
             .attachments(&[self.color_blend_attachment])
             .build();
 
         //build the actual pipeline
         //we now use all of the info structs we have been writing into into this one to create the pipeline
-        let pipeline_info = GraphicsPipelineCreateInfo::builder()
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&self.shader_stages[..])
             .vertex_input_state(&self.vertex_input_info)
             .input_assembly_state(&self.input_assembly)
@@ -98,18 +79,24 @@ impl PipelineBuilder {
             .layout(self.pipeline_layout)
             .render_pass(render_pass)
             .subpass(0)
-            .base_pipeline_handle(Pipeline::null())
+            .depth_stencil_state(&self.depth_stencil)
+            .base_pipeline_handle(vk::Pipeline::null())
             .build();
 
         let new_pipeline = device
-            .create_graphics_pipelines(PipelineCache::null(), &[pipeline_info], None)
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
             .expect("couldn't create the pipeline");
 
         new_pipeline[0]
     }
 }
 pub struct AllocatedBuffer {
-    pub buffer: ash::vk::Buffer,
+    pub buffer: vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+}
+
+pub struct AllocatedImage {
+    pub image: vk::Image,
     pub allocation: vk_mem::Allocation,
 }
 
@@ -141,27 +128,27 @@ struct VulkanApp {
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,
     surface_fn: Surface,
     surface: vk::SurfaceKHR,
-    surface_format: SurfaceFormatKHR,
+    surface_format: vk::SurfaceFormatKHR,
     device: ash::Device,
     swapchain_loader: Swapchain,
-    swapchain: SwapchainKHR,
-    swapchain_images: Vec<Image>,
-    swapchain_image_views: Vec<ImageView>,
-    command_pool: CommandPool,
-    main_cmd_buffer: CommandBuffer,
-    render_pass: RenderPass,
-    framebuffers: Vec<Framebuffer>,
-    present_semaphore: Semaphore,
-    render_semaphore: Semaphore,
-    render_fence: Fence,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
+    command_pool: vk::CommandPool,
+    main_cmd_buffer: vk::CommandBuffer,
+    render_pass: vk::RenderPass,
+    framebuffers: Vec<vk::Framebuffer>,
+    present_semaphore: vk::Semaphore,
+    render_semaphore: vk::Semaphore,
+    render_fence: vk::Fence,
     queues: Queues,
 
-    triangle_pipeline_layout: PipelineLayout,
-    mesh_pipeline_layout: PipelineLayout,
+    triangle_pipeline_layout: vk::PipelineLayout,
+    mesh_pipeline_layout: vk::PipelineLayout,
 
-    triangle_pipeline: Pipeline,
-    red_triangle_pipeline: Pipeline,
-    mesh_pipeline: Pipeline,
+    triangle_pipeline: vk::Pipeline,
+    red_triangle_pipeline: vk::Pipeline,
+    mesh_pipeline: vk::Pipeline,
     triangle_mesh: Mesh,
 
     // "game" state
@@ -171,6 +158,11 @@ struct VulkanApp {
     main_deletion_queue: DeletionQueue,
     allocator: vk_mem::Allocator,
     monkey_mesh: Mesh,
+
+    //depth buffer stuff
+    depth_image_view: vk::ImageView,
+    depth_image: AllocatedImage,
+    depth_format: vk::Format,
 }
 
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -275,111 +267,102 @@ impl VulkanApp {
          * swapchain creation
          */
 
-        let surface_capabilities = surface_fn
-            .get_physical_device_surface_capabilities(physical_device, surface)
-            .unwrap();
-
-        let max_image_count = match surface_capabilities.max_image_count {
-            0 => u32::MAX,
-            x => x,
-        };
-        let min_image_count = (surface_capabilities.min_image_count + 1).min(max_image_count);
-
-        let transform = if surface_capabilities
-            .supported_transforms
-            .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
-        {
-            vk::SurfaceTransformFlagsKHR::IDENTITY
-        } else {
-            surface_capabilities.current_transform
-        };
-
-        let queue_families = [queues.graphics_family, queues.present_family];
-        let (image_sharing_mode, queue_families) =
-            if queues.graphics_family == queues.present_family {
-                (vk::SharingMode::EXCLUSIVE, &queue_families[..1])
-            } else {
-                (vk::SharingMode::CONCURRENT, &queue_families[..])
-            };
-
-        let surface_format = SurfaceFormatKHR::builder()
-            .format(Format::B8G8R8A8_SRGB)
-            .color_space(ColorSpaceKHR::SRGB_NONLINEAR)
+        let surface_format = vk::SurfaceFormatKHR::builder()
+            .format(vk::Format::B8G8R8A8_SRGB)
+            .color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
             .build();
 
-        let swapchain_create_info = SwapchainCreateInfoKHR::builder()
-            .surface(surface)
-            .min_image_count(min_image_count)
-            .image_format(surface_format.format)
-            .image_color_space(surface_format.color_space)
-            .image_extent(Extent2D {
-                width: WINDOW_WIDTH,
-                height: WINDOW_HEIGHT,
-            })
-            .image_array_layers(1)
-            .image_usage(ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(image_sharing_mode)
-            .queue_family_indices(&queue_families)
-            .pre_transform(transform)
-            .composite_alpha(CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(PresentModeKHR::FIFO)
-            .clipped(true)
-            .build();
+        let (swapchain_loader, swapchain, swapchain_images, swapchain_image_views) = init_swapchain(
+            &instance,
+            &device,
+            &surface_fn,
+            surface,
+            surface_format,
+            physical_device,
+            &queues,
+        );
 
-        let swapchain_loader = Swapchain::new(&instance, &device);
-        let swapchain = swapchain_loader
-            .create_swapchain(&swapchain_create_info, None)
+        //VMA allocator
+
+        //allocator
+        let allocator_info = vk_mem::AllocatorCreateInfo {
+            physical_device: physical_device,
+            device: device.clone(),
+            instance: instance.clone(),
+            ..Default::default()
+        };
+
+        let allocator = vk_mem::Allocator::new(&allocator_info).unwrap();
+
+        //****
+        //Depth buffer stuff
+        //****
+
+        let window_extent = vk::Extent2D {
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
+        };
+
+        //depth image size will match the window
+        let depth_image_extent = vk::Extent3D {
+            width: window_extent.width,
+            height: window_extent.height,
+            depth: 1,
+        };
+
+        //hardcoding the depth format to 32 bit float
+        let depth_format = vk::Format::D32_SFLOAT;
+
+        //the depth image will be an image with the format we selected and Depth Attachment usage flag
+        let dimg_info = get_image_create_info(
+            depth_format,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            depth_image_extent,
+        );
+
+        //allocate and create the image
+        let (depth_image, di_allocation, _di_alloc_info) = allocator
+            .create_image(
+                &dimg_info,
+                &vk_mem::AllocationCreateInfo {
+                    usage: vk_mem::MemoryUsage::GpuOnly,
+                    required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
-        let swapchain_images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
-        let mut swapchain_image_views: Vec<ImageView> = Vec::with_capacity(swapchain_images.len());
+        let di_allocated = AllocatedImage {
+            image: depth_image,
+            allocation: di_allocation,
+        };
 
-        for image in &swapchain_images {
-            let componnent_mapping = ComponentMapping::builder()
-                .r(ComponentSwizzle::IDENTITY)
-                .g(ComponentSwizzle::IDENTITY)
-                .b(ComponentSwizzle::IDENTITY)
-                .a(ComponentSwizzle::IDENTITY)
-                .build();
+        //build an image-view for the depth image to use for rendering
+        let dview_info = get_image_view_create_info(
+            depth_format,
+            di_allocated.image,
+            vk::ImageAspectFlags::DEPTH,
+        );
 
-            let subresource_range = ImageSubresourceRange::builder()
-                .aspect_mask(ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1)
-                .build();
-
-            let create_info = ImageViewCreateInfo::builder()
-                .image(*image)
-                .view_type(ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .components(componnent_mapping)
-                .subresource_range(subresource_range)
-                .build();
-
-            let image_view = device.create_image_view(&create_info, None).unwrap();
-
-            swapchain_image_views.push(image_view);
-        }
+        let depth_image_view = device.create_image_view(&dview_info, None).unwrap();
 
         /*
         //command stuff
          */
 
-        let command_pool_info = CommandPoolCreateInfo::builder()
+        let command_pool_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queues.graphics_family)
-            .flags(CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .build();
 
         let command_pool = device
             .create_command_pool(&command_pool_info, None)
             .unwrap();
 
-        let cmd_buffer_allocate_info = CommandBufferAllocateInfo::builder()
+        let cmd_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
             .command_buffer_count(1)
-            .level(CommandBufferLevel::PRIMARY)
+            .level(vk::CommandBufferLevel::PRIMARY)
             .build();
 
         let main_cmd_buffers = device
@@ -394,52 +377,65 @@ impl VulkanApp {
         */
 
         //color attachment
-        let attachment_desc = AttachmentDescription::builder()
+        let color_attachment_desc = vk::AttachmentDescription::builder()
             .format(surface_format.format)
-            .samples(SampleCountFlags::TYPE_1)
-            .load_op(AttachmentLoadOp::CLEAR)
-            .store_op(AttachmentStoreOp::STORE)
-            .stencil_load_op(AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(AttachmentStoreOp::DONT_CARE)
-            .initial_layout(ImageLayout::UNDEFINED)
-            .final_layout(ImageLayout::PRESENT_SRC_KHR)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
             .build();
 
-        let attachment_descs = [attachment_desc];
-
-        let color_attachment_ref = AttachmentReference::builder()
+        let color_attachment_ref = vk::AttachmentReference::builder()
             .attachment(0)
-            .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .build();
 
-        let color_attachment_refs = [color_attachment_ref];
+        //depth attachment
+        let depth_attachment_desc = vk::AttachmentDescription::builder()
+            .format(depth_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .build();
+
+        let depth_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .build();
 
         //subpass
-        let subpass_desc = SubpassDescription::builder()
-            .pipeline_bind_point(PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_attachment_refs)
+        let subpass_desc = vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&[color_attachment_ref])
+            .depth_stencil_attachment(&depth_attachment_ref)
             .build();
 
         let subpass_descs = [subpass_desc];
 
         //creating render pass
-
-        let render_pass_info = RenderPassCreateInfo::builder()
-            .attachments(&attachment_descs)
+        let render_pass_info = vk::RenderPassCreateInfo::builder()
+            .attachments(&[color_attachment_desc, depth_attachment_desc])
             .subpasses(&subpass_descs)
             .build();
 
         let render_pass = device.create_render_pass(&render_pass_info, None).unwrap();
 
         //frame buffers
-        let mut framebuffers: Vec<Framebuffer> = Vec::with_capacity(swapchain_images.len());
+        let mut framebuffers: Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_images.len());
         for swapchain_image in &swapchain_image_views {
-            let fb_info = FramebufferCreateInfo::builder()
+            let fb_info = vk::FramebufferCreateInfo::builder()
                 .render_pass(render_pass)
                 .width(WINDOW_WIDTH)
                 .height(WINDOW_HEIGHT)
                 .layers(1)
-                .attachments(&[*swapchain_image])
+                .attachments(&[*swapchain_image, depth_image_view])
                 .build();
 
             let fb = device.create_framebuffer(&fb_info, None).unwrap();
@@ -448,24 +444,19 @@ impl VulkanApp {
 
         //initializing semaphores and fence
 
-        let fence_create_info = FenceCreateInfo::builder()
-            .flags(FenceCreateFlags::SIGNALED)
+        let fence_create_info = vk::FenceCreateInfo::builder()
+            .flags(vk::FenceCreateFlags::SIGNALED)
             .build();
 
         let render_fence = device.create_fence(&fence_create_info, None).unwrap();
 
-        let semaphore_create_info = SemaphoreCreateInfo::default();
+        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
         let present_semaphore = device
             .create_semaphore(&semaphore_create_info, None)
             .unwrap();
         let render_semaphore = device
             .create_semaphore(&semaphore_create_info, None)
             .unwrap();
-
-        let window_extent = Extent2D {
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
-        };
 
         let (
             triangle_pipeline_layout,
@@ -474,23 +465,6 @@ impl VulkanApp {
             red_triangle_pipeline,
             mesh_pipeline,
         ) = init_pipelines(&device, window_extent, render_pass);
-
-        //allocator
-
-        // Create the buffer (GPU only, 16KiB in this example)
-        // let create_info = vk_mem::AllocationCreateInfo {
-        //     usage: vk_mem::MemoryUsage::GpuOnly,
-        //     ..Default::default()
-        // };
-
-        let allocator_info = vk_mem::AllocatorCreateInfo {
-            physical_device: physical_device,
-            device: device.clone(),
-            instance: instance.clone(),
-            ..Default::default()
-        };
-
-        let allocator = vk_mem::Allocator::new(&allocator_info).unwrap();
 
         //loading mesh
 
@@ -549,7 +523,11 @@ impl VulkanApp {
             triangle_mesh,
             mesh_pipeline,
             mesh_pipeline_layout,
-            monkey_mesh
+            monkey_mesh,
+
+            depth_image: di_allocated,
+            depth_image_view,
+            depth_format
         };
 
         app.main_deletion_queue.push_function(|app| {
@@ -561,6 +539,10 @@ impl VulkanApp {
             for image_view in &app.swapchain_image_views {
                 app.device.destroy_image_view(*image_view, None);
             }
+
+            app.device.destroy_image_view(app.depth_image_view, None);
+            app.allocator
+                .destroy_image(app.depth_image.image, &app.depth_image.allocation);
 
             app.device.destroy_command_pool(app.command_pool, None);
             app.device.destroy_fence(app.render_fence, None);
@@ -611,61 +593,70 @@ impl VulkanApp {
                 self.swapchain,
                 1000000000,
                 self.present_semaphore,
-                Fence::null(),
+                vk::Fence::null(),
             )
             .unwrap();
 
         self.device
-            .reset_command_buffer(self.main_cmd_buffer, CommandBufferResetFlags::empty())
+            .reset_command_buffer(self.main_cmd_buffer, vk::CommandBufferResetFlags::empty())
             .unwrap();
 
-        let cmd_begin_info = CommandBufferBeginInfo::builder()
-            .flags(CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+        let cmd_begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .build();
         self.device
             .begin_command_buffer(self.main_cmd_buffer, &cmd_begin_info)
             .unwrap();
 
+
+        //make a clear-color from frame number. This will flash with a 120 frame period.
         let flash = f32::abs((self.frame_number as f32 / 120.).sin());
-        let mut clear_value = ClearValue::default();
+        let mut clear_value = vk::ClearValue::default();
         clear_value.color = vk::ClearColorValue {
             float32: [0., 0., flash, 1.],
         };
 
-        let rp_info = RenderPassBeginInfo::builder()
+        //clear depth at 1
+        let mut depth_clear = vk::ClearValue::default();
+        depth_clear.depth_stencil.depth = 1.;
+
+        let rp_info = vk::RenderPassBeginInfo::builder()
             .render_pass(self.render_pass)
-            .render_area(Rect2D {
-                offset: Offset2D::default(),
-                extent: Extent2D {
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D::default(),
+                extent: vk::Extent2D {
                     width: WINDOW_WIDTH,
                     height: WINDOW_HEIGHT,
                 },
             })
             .framebuffer(self.framebuffers[swapchain_index.0 as usize])
-            .clear_values(&[clear_value])
+            .clear_values(&[clear_value, depth_clear])
             .build();
 
-        self.device
-            .cmd_begin_render_pass(self.main_cmd_buffer, &rp_info, SubpassContents::INLINE);
+        self.device.cmd_begin_render_pass(
+            self.main_cmd_buffer,
+            &rp_info,
+            vk::SubpassContents::INLINE,
+        );
 
         //render stuff..
 
         if self.selected_shader == 0 {
             self.device.cmd_bind_pipeline(
                 self.main_cmd_buffer,
-                PipelineBindPoint::GRAPHICS,
+                vk::PipelineBindPoint::GRAPHICS,
                 self.mesh_pipeline,
             );
         } else {
             self.device.cmd_bind_pipeline(
                 self.main_cmd_buffer,
-                PipelineBindPoint::GRAPHICS,
+                vk::PipelineBindPoint::GRAPHICS,
                 self.red_triangle_pipeline,
             );
         }
 
         //bind the mesh vertex buffer with offset 0
-        let offset: DeviceSize = 0;
+        let offset: vk::DeviceSize = 0;
         self.device.cmd_bind_vertex_buffers(
             self.main_cmd_buffer,
             0,
@@ -680,19 +671,37 @@ impl VulkanApp {
         let view = nalgebra_glm::translate(&nalgebra_glm::identity(), &cam_pos);
         //camera projection
         // let projection = nalgebra_glm::perspective(1700. / 900., 1.22173, 0.1, 200.);
-        let mut projection = nalgebra_glm::perspective(WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32, nalgebra_glm::radians(&vec1(90.))[0], 0.1, 200.);
+        let mut projection = nalgebra_glm::perspective(
+            WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32,
+            nalgebra_glm::radians(&vec1(90.))[0],
+            0.1,
+            200.,
+        );
         projection[5] *= -1.;
 
         // model rotations
-        let model = nalgebra_glm::rotate::<f32>(&nalgebra_glm::identity(), nalgebra_glm::radians(&vec1(self.frame_number as f32 * 0.4))[0], &vec3(0.,1.,0.));
+        let model = nalgebra_glm::rotate::<f32>(
+            &nalgebra_glm::identity(),
+            nalgebra_glm::radians(&vec1(self.frame_number as f32 * 0.4))[0],
+            &vec3(0., 1., 0.),
+        );
 
         //calculate final mesh matrix
-        let mesh_matrix : Mat4 = projection * view * model;
+        let mesh_matrix: Mat4 = projection * view * model;
 
-        let constants = MeshPushConstants { data: vec4(0., 0., 0., 0.), render_matrix: mesh_matrix };
+        let constants = MeshPushConstants {
+            data: vec4(0., 0., 0., 0.),
+            render_matrix: mesh_matrix,
+        };
 
         //upload the matrix to the GPU via push constants
-        self.device.cmd_push_constants(self.main_cmd_buffer, self.mesh_pipeline_layout, ShaderStageFlags::VERTEX, 0, bytemuck::cast_slice(&[constants]));
+        self.device.cmd_push_constants(
+            self.main_cmd_buffer,
+            self.mesh_pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            bytemuck::cast_slice(&[constants]),
+        );
 
         self.device.cmd_draw(
             self.main_cmd_buffer,
@@ -708,8 +717,8 @@ impl VulkanApp {
             .end_command_buffer(self.main_cmd_buffer)
             .unwrap();
 
-        let vk_submit_info = SubmitInfo::builder()
-            .wait_dst_stage_mask(&[PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
+        let vk_submit_info = vk::SubmitInfo::builder()
+            .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
             .wait_semaphores(&[self.present_semaphore])
             .signal_semaphores(&[self.render_semaphore])
             .command_buffers(&[self.main_cmd_buffer])
@@ -719,7 +728,7 @@ impl VulkanApp {
             .queue_submit(self.queues.graphics, &[vk_submit_info], self.render_fence)
             .unwrap();
 
-        let present_info = PresentInfoKHR::builder()
+        let present_info = vk::PresentInfoKHR::builder()
             .swapchains(&[self.swapchain])
             .wait_semaphores(&[self.render_semaphore])
             .image_indices(&[swapchain_index.0])
@@ -861,11 +870,13 @@ impl Drop for VulkanApp {
 unsafe fn load_shader_module(
     device: &ash::Device,
     file_path: String,
-) -> Result<ShaderModule, std::io::Error> {
+) -> Result<vk::ShaderModule, std::io::Error> {
     let mut file = File::open(file_path)?;
     let file = ash::util::read_spv(&mut file)?;
 
-    let shader_create_info = ShaderModuleCreateInfo::builder().code(&file[..]).build();
+    let shader_create_info = vk::ShaderModuleCreateInfo::builder()
+        .code(&file[..])
+        .build();
 
     let shader_module = device
         .create_shader_module(&shader_create_info, None)
@@ -875,9 +886,15 @@ unsafe fn load_shader_module(
 
 unsafe fn init_pipelines(
     device: &ash::Device,
-    window_extent: Extent2D,
-    render_pass: RenderPass,
-) -> (PipelineLayout, PipelineLayout, Pipeline, Pipeline, Pipeline) {
+    window_extent: vk::Extent2D,
+    render_pass: vk::RenderPass,
+) -> (
+    vk::PipelineLayout,
+    vk::PipelineLayout,
+    vk::Pipeline,
+    vk::Pipeline,
+    vk::Pipeline,
+) {
     let triangle_vertex_shader =
         load_shader_module(device, "shaders/colored_triangle.vert.spv".to_string()).unwrap();
 
@@ -896,14 +913,14 @@ unsafe fn init_pipelines(
     //build the stage-create-info for both vertex and fragment stages. This lets the pipeline know the shader modules per stage
     let name = CString::new("main").unwrap();
 
-    let shader_stages: Vec<PipelineShaderStageCreateInfo> = vec![
+    let shader_stages: Vec<vk::PipelineShaderStageCreateInfo> = vec![
         get_pipeline_shader_stage_create_info(
-            ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::VERTEX,
             triangle_vertex_shader,
             &name,
         ),
         get_pipeline_shader_stage_create_info(
-            ShaderStageFlags::FRAGMENT,
+            vk::ShaderStageFlags::FRAGMENT,
             triangle_frag_shader,
             &name,
         ),
@@ -914,10 +931,10 @@ unsafe fn init_pipelines(
 
     //input assembly is the configuration for drawing triangle lists, strips, or individual points.
     //we are just going to draw triangle list
-    let input_assembly = get_input_assembly_create_info(PrimitiveTopology::TRIANGLE_LIST);
+    let input_assembly = get_input_assembly_create_info(vk::PrimitiveTopology::TRIANGLE_LIST);
 
     //build viewport and scissor from the swapchain extents
-    let viewport = Viewport::builder()
+    let viewport = vk::Viewport::builder()
         .x(0.0)
         .y(0.0)
         .width(window_extent.width as f32)
@@ -926,10 +943,10 @@ unsafe fn init_pipelines(
         .max_depth(1.0)
         .build();
 
-    let scissor: Rect2D = Rect2D::builder().extent(window_extent).build();
+    let scissor: vk::Rect2D = vk::Rect2D::builder().extent(window_extent).build();
 
     //configure the rasterizer to draw filled triangles
-    let rasterizer = get_rasterization_state_create_info(PolygonMode::FILL);
+    let rasterizer = get_rasterization_state_create_info(vk::PolygonMode::FILL);
 
     //we don't use multisampling, so just run the default one
     let multisampling = get_multisampling_state_create_info();
@@ -955,6 +972,7 @@ unsafe fn init_pipelines(
         color_blend_attachment,
         multisampling,
         pipeline_layout,
+        depth_stencil: get_depth_stencil_create_info(true, true, vk::CompareOp::LESS_OR_EQUAL)
     };
 
     let triangle_pipeline = pipeline_builder.build_pipeline(device, render_pass);
@@ -966,14 +984,14 @@ unsafe fn init_pipelines(
     pipeline_builder
         .shader_stages
         .push(get_pipeline_shader_stage_create_info(
-            ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::VERTEX,
             red_triangle_vertex_shader,
             &name,
         ));
     pipeline_builder
         .shader_stages
         .push(get_pipeline_shader_stage_create_info(
-            ShaderStageFlags::FRAGMENT,
+            vk::ShaderStageFlags::FRAGMENT,
             red_triangle_frag_shader,
             &name,
         ));
@@ -983,13 +1001,13 @@ unsafe fn init_pipelines(
     // making mesh triangle pipeline
 
     //push constants
-    let push_constant = PushConstantRange::builder()
+    let push_constant = vk::PushConstantRange::builder()
         .offset(0)
         .size(std::mem::size_of::<MeshPushConstants>() as u32)
-        .stage_flags(ShaderStageFlags::VERTEX)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)
         .build();
 
-    let mesh_pipeline_layout_info = PipelineLayoutCreateInfo::builder()
+    let mesh_pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder()
         .push_constant_ranges(&[push_constant])
         .build();
 
@@ -1000,7 +1018,7 @@ unsafe fn init_pipelines(
     let vertex_description = Vertex::get_vertex_description();
 
     //connect the pipeline builder vertex input info to the one we get from Vertex
-    pipeline_builder.vertex_input_info = PipelineVertexInputStateCreateInfo::builder()
+    pipeline_builder.vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
         .vertex_attribute_descriptions(&vertex_description.attributes)
         .vertex_binding_descriptions(&vertex_description.bindings)
         .build();
@@ -1010,14 +1028,14 @@ unsafe fn init_pipelines(
     pipeline_builder
         .shader_stages
         .push(get_pipeline_shader_stage_create_info(
-            ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::VERTEX,
             mesh_vert_shader,
             &name,
         ));
     pipeline_builder
         .shader_stages
         .push(get_pipeline_shader_stage_create_info(
-            ShaderStageFlags::FRAGMENT,
+            vk::ShaderStageFlags::FRAGMENT,
             triangle_frag_shader,
             &name,
         ));
@@ -1042,11 +1060,11 @@ unsafe fn init_pipelines(
 }
 
 fn get_pipeline_shader_stage_create_info(
-    stage: ShaderStageFlags,
-    shader_module: ShaderModule,
+    stage: vk::ShaderStageFlags,
+    shader_module: vk::ShaderModule,
     name: &CString,
-) -> PipelineShaderStageCreateInfo {
-    let info = PipelineShaderStageCreateInfo::builder()
+) -> vk::PipelineShaderStageCreateInfo {
+    let info = vk::PipelineShaderStageCreateInfo::builder()
         .stage(stage)
         .module(shader_module)
         .name(name)
@@ -1055,32 +1073,88 @@ fn get_pipeline_shader_stage_create_info(
     info
 }
 
-fn get_vertex_input_state_create_info() -> PipelineVertexInputStateCreateInfo {
-    let info = PipelineVertexInputStateCreateInfo::builder().build();
+fn get_image_create_info(
+    format: vk::Format,
+    usage_flags: vk::ImageUsageFlags,
+    extent: vk::Extent3D,
+) -> vk::ImageCreateInfo {
+    vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(extent)
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(usage_flags)
+        .build()
+}
+
+fn get_image_view_create_info(
+    format: vk::Format,
+    image: vk::Image,
+    aspect_flags: vk::ImageAspectFlags,
+) -> vk::ImageViewCreateInfo {
+    vk::ImageViewCreateInfo::builder()
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .image(image)
+        .format(format)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: aspect_flags,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        .build()
+}
+
+fn get_vertex_input_state_create_info() -> vk::PipelineVertexInputStateCreateInfo {
+    let info = vk::PipelineVertexInputStateCreateInfo::builder().build();
 
     info
 }
 
 fn get_input_assembly_create_info(
-    topology: PrimitiveTopology,
-) -> PipelineInputAssemblyStateCreateInfo {
-    let info = PipelineInputAssemblyStateCreateInfo::builder()
+    topology: vk::PrimitiveTopology,
+) -> vk::PipelineInputAssemblyStateCreateInfo {
+    let info = vk::PipelineInputAssemblyStateCreateInfo::builder()
         .topology(topology)
         .primitive_restart_enable(false)
         .build();
     info
 }
 
+fn get_depth_stencil_create_info(
+    depth_test: bool,
+    depth_write: bool,
+    compare_op: vk::CompareOp,
+) -> vk::PipelineDepthStencilStateCreateInfo {
+    vk::PipelineDepthStencilStateCreateInfo::builder()
+        .depth_test_enable(depth_test)
+        .depth_write_enable(depth_write)
+        .depth_compare_op(if depth_test {
+            compare_op
+        } else {
+            vk::CompareOp::ALWAYS
+        })
+        .depth_bounds_test_enable(false)
+        .min_depth_bounds(0.) //Optional
+        .max_depth_bounds(1.) //Optional
+        .stencil_test_enable(false)
+        .build()
+}
+
 fn get_rasterization_state_create_info(
-    polygon_mode: PolygonMode,
-) -> PipelineRasterizationStateCreateInfo {
-    let info = PipelineRasterizationStateCreateInfo::builder()
+    polygon_mode: vk::PolygonMode,
+) -> vk::PipelineRasterizationStateCreateInfo {
+    let info = vk::PipelineRasterizationStateCreateInfo::builder()
         .depth_clamp_enable(false)
         .rasterizer_discard_enable(false)
         .polygon_mode(polygon_mode)
         .line_width(1.0)
-        .cull_mode(CullModeFlags::NONE)
-        .front_face(FrontFace::CLOCKWISE)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::CLOCKWISE)
         .depth_bias_enable(false)
         .depth_bias_constant_factor(0.0)
         .depth_bias_clamp(0.0)
@@ -1089,10 +1163,10 @@ fn get_rasterization_state_create_info(
     info
 }
 
-fn get_multisampling_state_create_info() -> PipelineMultisampleStateCreateInfo {
-    let info = PipelineMultisampleStateCreateInfo::builder()
+fn get_multisampling_state_create_info() -> vk::PipelineMultisampleStateCreateInfo {
+    let info = vk::PipelineMultisampleStateCreateInfo::builder()
         .sample_shading_enable(false)
-        .rasterization_samples(SampleCountFlags::TYPE_1)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1)
         .min_sample_shading(1.0)
         .sample_mask(&[])
         .alpha_to_coverage_enable(false)
@@ -1101,21 +1175,125 @@ fn get_multisampling_state_create_info() -> PipelineMultisampleStateCreateInfo {
     info
 }
 
-fn get_color_blend_attachment_state() -> PipelineColorBlendAttachmentState {
-    let info = PipelineColorBlendAttachmentState::builder()
+fn get_color_blend_attachment_state() -> vk::PipelineColorBlendAttachmentState {
+    let info = vk::PipelineColorBlendAttachmentState::builder()
         .color_write_mask(
-            ColorComponentFlags::R
-                | ColorComponentFlags::G
-                | ColorComponentFlags::B
-                | ColorComponentFlags::A,
+            vk::ColorComponentFlags::R
+                | vk::ColorComponentFlags::G
+                | vk::ColorComponentFlags::B
+                | vk::ColorComponentFlags::A,
         )
         .blend_enable(false)
         .build();
     info
 }
 
-fn get_pipeline_layout_create_info() -> PipelineLayoutCreateInfo {
-    let info = PipelineLayoutCreateInfo::builder().build();
+unsafe fn init_swapchain(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    surface_fn: &Surface,
+    surface: vk::SurfaceKHR,
+    surface_format: vk::SurfaceFormatKHR,
+    physical_device: vk::PhysicalDevice,
+    queues: &Queues,
+) -> (
+    Swapchain,
+    vk::SwapchainKHR,
+    Vec<vk::Image>,
+    Vec<vk::ImageView>,
+) {
+    let surface_capabilities = surface_fn
+        .get_physical_device_surface_capabilities(physical_device, surface)
+        .unwrap();
+
+    let max_image_count = match surface_capabilities.max_image_count {
+        0 => u32::MAX,
+        x => x,
+    };
+    let min_image_count = (surface_capabilities.min_image_count + 1).min(max_image_count);
+
+    let transform = if surface_capabilities
+        .supported_transforms
+        .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+    {
+        vk::SurfaceTransformFlagsKHR::IDENTITY
+    } else {
+        surface_capabilities.current_transform
+    };
+
+    let queue_families = [queues.graphics_family, queues.present_family];
+    let (image_sharing_mode, queue_families) = if queues.graphics_family == queues.present_family {
+        (vk::SharingMode::EXCLUSIVE, &queue_families[..1])
+    } else {
+        (vk::SharingMode::CONCURRENT, &queue_families[..])
+    };
+
+    let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+        .surface(surface)
+        .min_image_count(min_image_count)
+        .image_format(surface_format.format)
+        .image_color_space(surface_format.color_space)
+        .image_extent(vk::Extent2D {
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
+        })
+        .image_array_layers(1)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_sharing_mode(image_sharing_mode)
+        .queue_family_indices(&queue_families)
+        .pre_transform(transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(vk::PresentModeKHR::FIFO)
+        .clipped(true)
+        .build();
+
+    let swapchain_loader = Swapchain::new(&instance, &device);
+    let swapchain = swapchain_loader
+        .create_swapchain(&swapchain_create_info, None)
+        .unwrap();
+
+    let swapchain_images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
+    let mut swapchain_image_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_images.len());
+
+    for image in &swapchain_images {
+        let componnent_mapping = vk::ComponentMapping::builder()
+            .r(vk::ComponentSwizzle::IDENTITY)
+            .g(vk::ComponentSwizzle::IDENTITY)
+            .b(vk::ComponentSwizzle::IDENTITY)
+            .a(vk::ComponentSwizzle::IDENTITY)
+            .build();
+
+        let subresource_range = vk::ImageSubresourceRange::builder()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1)
+            .build();
+
+        let create_info = vk::ImageViewCreateInfo::builder()
+            .image(*image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(surface_format.format)
+            .components(componnent_mapping)
+            .subresource_range(subresource_range)
+            .build();
+
+        let image_view = device.create_image_view(&create_info, None).unwrap();
+
+        swapchain_image_views.push(image_view);
+    }
+
+    (
+        swapchain_loader,
+        swapchain,
+        swapchain_images,
+        swapchain_image_views,
+    )
+}
+
+fn get_pipeline_layout_create_info() -> vk::PipelineLayoutCreateInfo {
+    let info = vk::PipelineLayoutCreateInfo::builder().build();
     info
 }
 
