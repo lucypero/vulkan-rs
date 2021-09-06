@@ -4,11 +4,12 @@ mod mesh;
 mod platforms;
 
 use std::borrow::Borrow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_void, CStr, CString};
 use std::fs::File;
 use std::os::raw::c_char;
 use std::path::Path;
+use std::rc::Rc;
 use std::str::FromStr;
 use std::{mem, slice};
 
@@ -46,7 +47,7 @@ struct PipelineBuilder {
     color_blend_attachment: vk::PipelineColorBlendAttachmentState,
     multisampling: vk::PipelineMultisampleStateCreateInfo,
     pipeline_layout: vk::PipelineLayout,
-    depth_stencil: vk::PipelineDepthStencilStateCreateInfo
+    depth_stencil: vk::PipelineDepthStencilStateCreateInfo,
 }
 
 impl PipelineBuilder {
@@ -121,6 +122,18 @@ impl DeletionQueue {
         self.deletors.clear();
     }
 }
+
+struct Material {
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+}
+
+struct RenderObject {
+    mesh: Rc<Mesh>,
+    material: Rc<Material>,
+    transform_matrix: Mat4,
+}
+
 struct VulkanApp {
     entry: Entry,
     instance: ash::Instance,
@@ -143,26 +156,21 @@ struct VulkanApp {
     render_fence: vk::Fence,
     queues: Queues,
 
-    triangle_pipeline_layout: vk::PipelineLayout,
-    mesh_pipeline_layout: vk::PipelineLayout,
-
-    triangle_pipeline: vk::Pipeline,
-    red_triangle_pipeline: vk::Pipeline,
-    mesh_pipeline: vk::Pipeline,
-    triangle_mesh: Mesh,
-
-    // "game" state
     frame_number: i64,
 
     selected_shader: i32,
     main_deletion_queue: DeletionQueue,
     allocator: vk_mem::Allocator,
-    monkey_mesh: Mesh,
 
     //depth buffer stuff
     depth_image_view: vk::ImageView,
     depth_image: AllocatedImage,
     depth_format: vk::Format,
+
+    //renderable objects
+    renderables: Vec<RenderObject>,
+    materials: HashMap<String, Rc<Material>>,
+    meshes: HashMap<String, Rc<Mesh>>,
 }
 
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -459,10 +467,7 @@ impl VulkanApp {
             .unwrap();
 
         let (
-            triangle_pipeline_layout,
             mesh_pipeline_layout,
-            triangle_pipeline,
-            red_triangle_pipeline,
             mesh_pipeline,
         ) = init_pipelines(&device, window_extent, render_pass);
 
@@ -489,7 +494,23 @@ impl VulkanApp {
 
         //creating vertex buffer
         let triangle_mesh = Mesh::new(mesh_vertices, &allocator);
-        let monkey_mesh = Mesh::load_from_obj("assets/monkey_flat.obj", &allocator);
+        let monkey_mesh = Mesh::load_from_obj("assets/monkey_smooth.obj", &allocator);
+
+        //registering meshes on meshes hashmap
+        let mut meshes: HashMap<String, Rc<Mesh>> = HashMap::new();
+        meshes.insert("monkey".to_owned(), Rc::new(monkey_mesh));
+        meshes.insert("triangle".to_owned(), Rc::new(triangle_mesh));
+
+        let mut materials: HashMap<String, Rc<Material>> = HashMap::new();
+
+        // creating default mesh and insert them in materials
+
+        let default_mesh = Material {
+            pipeline: mesh_pipeline,
+            pipeline_layout: mesh_pipeline_layout,
+        };
+
+        materials.insert("defaultmesh".to_owned(), Rc::new(default_mesh));
 
         let mut app = VulkanApp {
             entry,
@@ -514,21 +535,20 @@ impl VulkanApp {
             frame_number: 0,
             queues,
 
-            triangle_pipeline_layout,
-            triangle_pipeline,
-            red_triangle_pipeline,
             selected_shader: 0,
             main_deletion_queue,
             allocator,
-            triangle_mesh,
-            mesh_pipeline,
-            mesh_pipeline_layout,
-            monkey_mesh,
 
             depth_image: di_allocated,
             depth_image_view,
-            depth_format
+            depth_format,
+
+            renderables: vec![],
+            meshes,
+            materials,
         };
+
+        app.init_scene();
 
         app.main_deletion_queue.push_function(|app| {
             app.swapchain_loader.destroy_swapchain(app.swapchain, None);
@@ -549,25 +569,151 @@ impl VulkanApp {
             app.device.destroy_semaphore(app.present_semaphore, None);
             app.device.destroy_semaphore(app.render_semaphore, None);
 
-            app.allocator.destroy_buffer(
-                app.triangle_mesh.vertex_buffer.buffer,
-                &app.triangle_mesh.vertex_buffer.allocation,
-            );
-            app.allocator.destroy_buffer(
-                app.monkey_mesh.vertex_buffer.buffer,
-                &app.monkey_mesh.vertex_buffer.allocation,
-            );
+            // destroying all allocated buffers
+            for (_, m) in app.meshes.iter() {
+                app.allocator.destroy_buffer(
+                    m.vertex_buffer.buffer,
+                    &m.vertex_buffer.allocation);
+            }
 
-            app.device.destroy_pipeline(app.red_triangle_pipeline, None);
-            app.device.destroy_pipeline(app.triangle_pipeline, None);
-            app.device.destroy_pipeline(app.mesh_pipeline, None);
-            app.device
-                .destroy_pipeline_layout(app.triangle_pipeline_layout, None);
-            app.device
-                .destroy_pipeline_layout(app.mesh_pipeline_layout, None);
+            //destroying all pipelines and pipeline layouts
+            for (_, m) in app.materials.iter() {
+                app.device.destroy_pipeline(m.pipeline, None);
+                app.device.destroy_pipeline_layout(m.pipeline_layout, None);
+            }
         });
 
         app
+    }
+
+    fn create_material(
+        &mut self,
+        pipeline: vk::Pipeline,
+        layout: vk::PipelineLayout,
+        name: String,
+    ) {
+        let material = Material {
+            pipeline: pipeline,
+            pipeline_layout: layout,
+        };
+
+        self.materials.insert(name, Rc::new(material));
+    }
+
+    fn init_scene(&mut self) {
+        let monkey = RenderObject {
+            mesh: self.get_mesh("monkey".to_owned()).unwrap(),
+            material: self.get_material("defaultmesh".to_owned()).unwrap(),
+            transform_matrix: nalgebra_glm::identity(),
+        };
+
+        self.renderables.push(monkey);
+
+        for x in -20..=20 {
+            for y in -20..=20 {
+                let translation = nalgebra_glm::translate(
+                    &nalgebra_glm::identity(),
+                    &vec3(x as f32, 0., y as f32),
+                );
+                let scale = nalgebra_glm::scale(&nalgebra_glm::identity(), &vec3(0.2, 0.2, 0.2));
+
+                let tri = RenderObject {
+                    mesh: self.get_mesh("triangle".to_owned()).unwrap(),
+                    material: self.get_material("defaultmesh".to_owned()).unwrap(),
+                    transform_matrix: translation * scale,
+                };
+
+                self.renderables.push(tri);
+            }
+        }
+    }
+
+    fn get_material(&self, name: String) -> Option<Rc<Material>> {
+        self.materials.get(&name).map(Rc::clone)
+    }
+
+    fn get_mesh(&self, name: String) -> Option<Rc<Mesh>> {
+        self.meshes.get(&name).map(Rc::clone)
+    }
+
+    unsafe fn draw_objects(&self, cmd: vk::CommandBuffer) {
+        //empty for now
+        let cam_pos = vec3(0., -6., -10.);
+        let view = nalgebra_glm::translate(&nalgebra_glm::identity(), &cam_pos);
+        //camera projection
+        let mut projection = nalgebra_glm::perspective(
+            WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32,
+            nalgebra_glm::radians(&vec1(90.))[0],
+            0.1,
+            200.,
+        );
+        projection[5] *= -1.;
+
+        if self.renderables.len() > 0 {
+            let mut last_mesh: Rc<Mesh> = Rc::clone(&self.renderables[0].mesh);
+            let mut last_material: Rc<Material> = Rc::clone(&self.renderables[0].material);
+
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                last_material.pipeline,
+            );
+
+            let offset: vk::DeviceSize = 0;
+            self.device.cmd_bind_vertex_buffers(
+                cmd,
+                0,
+                &[last_mesh.vertex_buffer.buffer],
+                &[offset],
+            );
+
+            for object in &self.renderables {
+                //only bind the pipeline if it doesn't match with the already bound one
+                if !Rc::ptr_eq(&object.material, &last_material) {
+                    self.device.cmd_bind_pipeline(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        object.material.pipeline,
+                    );
+                    last_material = Rc::clone(&object.material);
+                }
+
+                let model = object.transform_matrix;
+                //final render matrix, that we are calculating on the cpu
+                let mesh_matrix = projection * view * model;
+
+                let constants = MeshPushConstants {
+                    data: vec4(0., 0., 0., 0.),
+                    render_matrix: mesh_matrix,
+                };
+
+                //upload the mesh to the GPU via push constants
+                self.device.cmd_push_constants(
+                    cmd,
+                    object.material.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    bytemuck::cast_slice(&[constants]),
+                );
+
+                //only bind the mesh if it's a different one from last bind
+                if !Rc::ptr_eq(&object.mesh, &last_mesh) {
+                    //bind the mesh vertex buffer with offset 0
+                    let offset: vk::DeviceSize = 0;
+                    self.device.cmd_bind_vertex_buffers(
+                        cmd,
+                        0,
+                        &[object.mesh.vertex_buffer.buffer],
+                        &[offset],
+                    );
+                    last_mesh = Rc::clone(&object.mesh);
+                }
+
+                // we can now draw
+                self.device
+                    .cmd_draw(cmd, object.mesh.vertices.len() as u32, 1, 0, 0);
+            }
+        }
     }
 
     fn print_available_extensions(&self) {
@@ -608,7 +754,6 @@ impl VulkanApp {
             .begin_command_buffer(self.main_cmd_buffer, &cmd_begin_info)
             .unwrap();
 
-
         //make a clear-color from frame number. This will flash with a 120 frame period.
         let flash = f32::abs((self.frame_number as f32 / 120.).sin());
         let mut clear_value = vk::ClearValue::default();
@@ -639,77 +784,7 @@ impl VulkanApp {
             vk::SubpassContents::INLINE,
         );
 
-        //render stuff..
-
-        if self.selected_shader == 0 {
-            self.device.cmd_bind_pipeline(
-                self.main_cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.mesh_pipeline,
-            );
-        } else {
-            self.device.cmd_bind_pipeline(
-                self.main_cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.red_triangle_pipeline,
-            );
-        }
-
-        //bind the mesh vertex buffer with offset 0
-        let offset: vk::DeviceSize = 0;
-        self.device.cmd_bind_vertex_buffers(
-            self.main_cmd_buffer,
-            0,
-            &[self.monkey_mesh.vertex_buffer.buffer],
-            &[offset],
-        );
-
-        //make a model view matrix for rendering the object
-
-        //camera position
-        let cam_pos = vec3(0., 0., -2.);
-        let view = nalgebra_glm::translate(&nalgebra_glm::identity(), &cam_pos);
-        //camera projection
-        // let projection = nalgebra_glm::perspective(1700. / 900., 1.22173, 0.1, 200.);
-        let mut projection = nalgebra_glm::perspective(
-            WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32,
-            nalgebra_glm::radians(&vec1(90.))[0],
-            0.1,
-            200.,
-        );
-        projection[5] *= -1.;
-
-        // model rotations
-        let model = nalgebra_glm::rotate::<f32>(
-            &nalgebra_glm::identity(),
-            nalgebra_glm::radians(&vec1(self.frame_number as f32 * 0.4))[0],
-            &vec3(0., 1., 0.),
-        );
-
-        //calculate final mesh matrix
-        let mesh_matrix: Mat4 = projection * view * model;
-
-        let constants = MeshPushConstants {
-            data: vec4(0., 0., 0., 0.),
-            render_matrix: mesh_matrix,
-        };
-
-        //upload the matrix to the GPU via push constants
-        self.device.cmd_push_constants(
-            self.main_cmd_buffer,
-            self.mesh_pipeline_layout,
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            bytemuck::cast_slice(&[constants]),
-        );
-
-        self.device.cmd_draw(
-            self.main_cmd_buffer,
-            self.monkey_mesh.vertices.len() as u32,
-            1,
-            0,
-            0,
-        );
+        self.draw_objects(self.main_cmd_buffer);
 
         //finalize the render pass
         self.device.cmd_end_render_pass(self.main_cmd_buffer);
@@ -890,44 +965,16 @@ unsafe fn init_pipelines(
     render_pass: vk::RenderPass,
 ) -> (
     vk::PipelineLayout,
-    vk::PipelineLayout,
-    vk::Pipeline,
-    vk::Pipeline,
     vk::Pipeline,
 ) {
-    let triangle_vertex_shader =
-        load_shader_module(device, "shaders/colored_triangle.vert.spv".to_string()).unwrap();
-
     let triangle_frag_shader =
         load_shader_module(device, "shaders/colored_triangle.frag.spv".to_string()).unwrap();
-
-    let red_triangle_vertex_shader =
-        load_shader_module(device, "shaders/triangle.vert.spv".to_string()).unwrap();
-
-    let red_triangle_frag_shader =
-        load_shader_module(device, "shaders/triangle.frag.spv".to_string()).unwrap();
 
     let mesh_vert_shader =
         load_shader_module(device, "shaders/tri_mesh.vert.spv".to_string()).unwrap();
 
     //build the stage-create-info for both vertex and fragment stages. This lets the pipeline know the shader modules per stage
     let name = CString::new("main").unwrap();
-
-    let shader_stages: Vec<vk::PipelineShaderStageCreateInfo> = vec![
-        get_pipeline_shader_stage_create_info(
-            vk::ShaderStageFlags::VERTEX,
-            triangle_vertex_shader,
-            &name,
-        ),
-        get_pipeline_shader_stage_create_info(
-            vk::ShaderStageFlags::FRAGMENT,
-            triangle_frag_shader,
-            &name,
-        ),
-    ];
-
-    //vertex input controls how to read vertices from vertex buffers. We aren't using it yet
-    let vertex_input_info = get_vertex_input_state_create_info();
 
     //input assembly is the configuration for drawing triangle lists, strips, or individual points.
     //we are just going to draw triangle list
@@ -956,49 +1003,19 @@ unsafe fn init_pipelines(
 
     //build the pipeline layout that controls the inputs/outputs of the shader
     //we are not using descriptor sets or other systems yet, so no need to use anything other than empty default
-    let pipeline_layout_info = get_pipeline_layout_create_info();
-    let pipeline_layout = device
-        .create_pipeline_layout(&pipeline_layout_info, None)
-        .expect("could not create pipeline layout");
 
-    //finally build the pipeline
-    let mut pipeline_builder = PipelineBuilder {
-        shader_stages,
-        vertex_input_info,
-        input_assembly,
-        viewport,
-        scissor,
-        rasterizer,
-        color_blend_attachment,
-        multisampling,
-        pipeline_layout,
-        depth_stencil: get_depth_stencil_create_info(true, true, vk::CompareOp::LESS_OR_EQUAL)
-    };
-
-    let triangle_pipeline = pipeline_builder.build_pipeline(device, render_pass);
-
-    //making red triangle pipeline
-
-    pipeline_builder.shader_stages.clear();
-
-    pipeline_builder
-        .shader_stages
-        .push(get_pipeline_shader_stage_create_info(
+    let shader_stages = vec![
+        get_pipeline_shader_stage_create_info(
             vk::ShaderStageFlags::VERTEX,
-            red_triangle_vertex_shader,
+            mesh_vert_shader,
             &name,
-        ));
-    pipeline_builder
-        .shader_stages
-        .push(get_pipeline_shader_stage_create_info(
+        ),
+        get_pipeline_shader_stage_create_info(
             vk::ShaderStageFlags::FRAGMENT,
-            red_triangle_frag_shader,
+            triangle_frag_shader,
             &name,
-        ));
-
-    let red_triangle_pipeline = pipeline_builder.build_pipeline(device, render_pass);
-
-    // making mesh triangle pipeline
+        )
+    ];
 
     //push constants
     let push_constant = vk::PushConstantRange::builder()
@@ -1018,43 +1035,34 @@ unsafe fn init_pipelines(
     let vertex_description = Vertex::get_vertex_description();
 
     //connect the pipeline builder vertex input info to the one we get from Vertex
-    pipeline_builder.vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+    let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
         .vertex_attribute_descriptions(&vertex_description.attributes)
         .vertex_binding_descriptions(&vertex_description.bindings)
         .build();
 
-    pipeline_builder.shader_stages.clear();
+    //finally build the pipeline
+    let mut pipeline_builder = PipelineBuilder {
+        shader_stages,
+        vertex_input_info,
+        input_assembly,
+        viewport,
+        scissor,
+        rasterizer,
+        color_blend_attachment,
+        multisampling,
+        pipeline_layout: mesh_pipeline_layout,
+        depth_stencil: get_depth_stencil_create_info(true, true, vk::CompareOp::LESS_OR_EQUAL),
+    };
 
-    pipeline_builder
-        .shader_stages
-        .push(get_pipeline_shader_stage_create_info(
-            vk::ShaderStageFlags::VERTEX,
-            mesh_vert_shader,
-            &name,
-        ));
-    pipeline_builder
-        .shader_stages
-        .push(get_pipeline_shader_stage_create_info(
-            vk::ShaderStageFlags::FRAGMENT,
-            triangle_frag_shader,
-            &name,
-        ));
-
-    pipeline_builder.pipeline_layout = mesh_pipeline_layout;
+    // making mesh triangle pipeline
     let mesh_pipeline = pipeline_builder.build_pipeline(device, render_pass);
 
     //destroy shader modules
     device.destroy_shader_module(triangle_frag_shader, None);
-    device.destroy_shader_module(triangle_vertex_shader, None);
-    device.destroy_shader_module(red_triangle_frag_shader, None);
-    device.destroy_shader_module(red_triangle_vertex_shader, None);
     device.destroy_shader_module(mesh_vert_shader, None);
 
     (
-        pipeline_layout,
         mesh_pipeline_layout,
-        triangle_pipeline,
-        red_triangle_pipeline,
         mesh_pipeline,
     )
 }
@@ -1256,7 +1264,7 @@ unsafe fn init_swapchain(
     let mut swapchain_image_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_images.len());
 
     for image in &swapchain_images {
-        let componnent_mapping = vk::ComponentMapping::builder()
+        let component_mapping = vk::ComponentMapping::builder()
             .r(vk::ComponentSwizzle::IDENTITY)
             .g(vk::ComponentSwizzle::IDENTITY)
             .b(vk::ComponentSwizzle::IDENTITY)
@@ -1275,7 +1283,7 @@ unsafe fn init_swapchain(
             .image(*image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(surface_format.format)
-            .components(componnent_mapping)
+            .components(component_mapping)
             .subresource_range(subresource_range)
             .build();
 

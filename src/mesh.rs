@@ -85,7 +85,7 @@ impl Mesh {
         // let materials = materials.expect("Failed to load MTL file");
         //triangulate is false
 
-        println!("Number of models = {}", models.len());
+        // println!("Number of models = {}", models.len());
         // println!("Number of materials       = {}", materials.len());
 
         let mut vertices: Vec<Vertex> = vec![];
